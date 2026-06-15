@@ -112,3 +112,30 @@ CREATE TABLE IF NOT EXISTS ip_intel (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_ip_intel_updated_at ON ip_intel(updated_at DESC);
+CREATE TABLE IF NOT EXISTS soc_users (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  username TEXT UNIQUE NOT NULL,
+  role TEXT DEFAULT 'SOC Analyst',
+  password_note TEXT DEFAULT 'managed-by-env',
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS custom_detection_rules (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name TEXT NOT NULL,
+  rule_type TEXT NOT NULL CHECK (rule_type IN ('sigma','yara','keyword')),
+  severity TEXT DEFAULT 'medium',
+  mitre TEXT,
+  pattern TEXT NOT NULL,
+  enabled BOOLEAN DEFAULT true,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_custom_detection_rules_enabled ON custom_detection_rules(enabled);
+CREATE TABLE IF NOT EXISTS quarantine_items (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  original_path TEXT,
+  quarantine_path TEXT,
+  sha256 TEXT,
+  status TEXT DEFAULT 'quarantined',
+  action_id UUID REFERENCES actions(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);

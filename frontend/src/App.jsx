@@ -15,6 +15,7 @@ import {
   Mail,
   MapPin,
   Network,
+  PackageCheck,
   Radar,
   RefreshCw,
   ScanLine,
@@ -39,6 +40,7 @@ const modules = [
   { id: 'network', label: 'Network', icon: Network },
   { id: 'email', label: 'Email', icon: Mail },
   { id: 'defender', label: 'Defender', icon: ShieldCheck },
+  { id: 'pro', label: 'SOC Pro', icon: PackageCheck },
   { id: 'hunt', label: 'Hunting', icon: Crosshair },
   { id: 'malware', label: 'Malware', icon: Skull },
   { id: 'response', label: 'Respuesta', icon: Ban },
@@ -122,6 +124,10 @@ function App() {
   const [attacks, setAttacks] = useState([]);
   const [timeline, setTimeline] = useState([]);
   const [selectedIntel, setSelectedIntel] = useState(null);
+  const [proStatus, setProStatus] = useState(null);
+  const [mitreCoverage, setMitreCoverage] = useState([]);
+  const [reports, setReports] = useState([]);
+  const [quarantine, setQuarantine] = useState({ path: '', items: [] });
   const [blockedIps, setBlockedIps] = useState([]);
   const [stats, setStats] = useState(null);
   const [health, setHealth] = useState(null);
@@ -151,7 +157,7 @@ function App() {
   }
 
   async function load() {
-    const [nextAlerts, nextEvents, nextActions, nextStats, nextHealth, nextNetwork, nextBlockedIps, nextEmailThreats, nextDefender, nextAttacks] = await Promise.all([
+    const [nextAlerts, nextEvents, nextActions, nextStats, nextHealth, nextNetwork, nextBlockedIps, nextEmailThreats, nextDefender, nextAttacks, nextPro, nextMitre, nextReports, nextQuarantine] = await Promise.all([
       getJson('/api/alerts', []),
       getJson('/api/events', []),
       getJson('/api/actions', []),
@@ -162,6 +168,10 @@ function App() {
       getJson('/api/email/threats', []),
       getJson('/api/defender/status', null),
       getJson('/api/attacks', []),
+      getJson('/api/pro/status', null),
+      getJson('/api/mitre/coverage', []),
+      getJson('/api/reports', []),
+      getJson('/api/quarantine', { path: '', items: [] }),
     ]);
     setAlerts(nextAlerts);
     setEvents(nextEvents);
@@ -173,6 +183,10 @@ function App() {
     setEmailThreats(nextEmailThreats);
     setDefender(nextDefender);
     setAttacks(nextAttacks);
+    setProStatus(nextPro);
+    setMitreCoverage(nextMitre);
+    setReports(nextReports);
+    setQuarantine(nextQuarantine);
   }
 
   useEffect(() => {
@@ -426,6 +440,7 @@ function App() {
     critical: alerts.filter((item) => ['critical', 'high'].includes(item.severity)).length,
     actions: actions.length,
   };
+  const activeAttacks = useMemo(() => attacks.filter((attack) => attack.is_attack), [attacks]);
 
   return (
     <main className={activeAlarm ? 'shell alarm-mode' : 'shell'}>
@@ -594,6 +609,7 @@ function App() {
                     <ActionButton icon={FileSearch} label="Ubicar malware" onClick={() => action('locate_malware', fileTarget(alert), alert.id)} disabled={!fileTarget(alert)} />
                     <ActionButton icon={ScanLine} label="Defender" onClick={() => action('defender_scan', scanTarget(alert), alert.id)} />
                     <ActionButton icon={Trash2} label="Matar proceso" danger onClick={() => action('kill_process', fileTarget(alert), alert.id)} disabled={!fileTarget(alert) || isEmailAlert(alert)} />
+                    <ActionButton icon={PackageCheck} label="Cuarentena" danger onClick={() => action('quarantine_file', fileTarget(alert), alert.id)} disabled={!fileTarget(alert) || isEmailAlert(alert)} />
                     <ActionButton icon={Trash2} label="Remediar" danger onClick={() => action('remove_malware', fileTarget(alert), alert.id)} disabled={!fileTarget(alert)} />
                     <ActionButton icon={FileText} label="Reporte" onClick={() => action('generate_report', alert.source_ip || alert.id, alert.id)} />
                     <ActionButton icon={Trash2} label="Borrar alerta" onClick={() => removeAlert(alert.id)} />
@@ -699,7 +715,7 @@ function App() {
               <div className="attack-map">
                 <div className="globe">
                   <div className="globe-grid" />
-                  {attacks.slice(0, 18).map((attack, index) => {
+                  {activeAttacks.slice(0, 18).map((attack, index) => {
                     const top = 12 + (Math.abs(Number(attack.intel?.latitude || 0)) % 68);
                     const left = 8 + (Math.abs(Number(attack.intel?.longitude || 0)) % 84);
                     const homeTop = 86;
@@ -729,7 +745,7 @@ function App() {
                       </React.Fragment>
                     );
                   })}
-                  <div className={attacks.length ? 'home-node under-attack' : 'home-node'}>
+                  <div className={activeAttacks.length ? 'home-node under-attack' : 'home-node'}>
                     <Shield size={18} />
                     <span>PC-HERNAN</span>
                   </div>
@@ -773,6 +789,70 @@ function App() {
                     <strong>{item.title || item.code}</strong>
                     <small>{formatTime(item.created_at)} / {item.hostname || '-'} / {item.process || '-'}</small>
                     <small>{item.source_ip || '-'} {item.destination_port ? `:${item.destination_port}` : ''}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {active === 'pro' && (
+          <section className="layout two">
+            <div className="panel">
+              <div className="panel-head">
+                <h2>SOC Professional Pack</h2>
+                <span>servicio, auth, reportes, EVTX, Sigma/YARA</span>
+              </div>
+              <div className="defender-grid">
+                <article className="defender-card ok">
+                  <span>Auth local</span>
+                  <strong>{proStatus?.auth?.enabled ? 'Activo' : 'Listo'}</strong>
+                  <small>{proStatus?.auth?.user || 'analyst'} / env SOC_USERNAME</small>
+                </article>
+                <article className="defender-card ok">
+                  <span>MITRE ATT&CK</span>
+                  <strong>{proStatus?.mitre?.techniques ?? 0}</strong>
+                  <small>tecnicas observadas</small>
+                </article>
+                <article className="defender-card ok">
+                  <span>Reportes</span>
+                  <strong>{reports.length}</strong>
+                  <small>MD + HTML imprimible a PDF</small>
+                </article>
+                <article className="defender-card ok">
+                  <span>Cuarentena</span>
+                  <strong>{quarantine.items?.length ?? 0}</strong>
+                  <small>{shortText(quarantine.path, 54)}</small>
+                </article>
+              </div>
+              <div className="defender-section">
+                <h3>Instalacion Windows</h3>
+                <div className="defender-kv">
+                  <span>Instalar servicio/tarea</span><strong>{proStatus?.windowsService?.installer || 'scripts/install_windows_service.ps1'}</strong>
+                  <span>Desinstalar</span><strong>{proStatus?.windowsService?.uninstall || 'scripts/uninstall_windows_service.ps1'}</strong>
+                  <span>Importar EVTX</span><strong>{proStatus?.evtx?.importer || 'scripts/import_evtx.ps1'}</strong>
+                  <span>Sigma/YARA</span><strong>{(proStatus?.sigmaYara?.paths || []).join(' / ')}</strong>
+                </div>
+              </div>
+            </div>
+            <div className="panel">
+              <div className="panel-head">
+                <h2>Cobertura MITRE / Evidencia</h2>
+                <span>clasificacion y trazabilidad</span>
+              </div>
+              <div className="defender-list">
+                {mitreCoverage.slice(0, 18).map((item) => (
+                  <button className="defender-item" key={item.technique} onClick={() => setQuery(item.technique)}>
+                    <span className="severity high">{item.technique}</span>
+                    <strong>{item.alerts} alertas</strong>
+                    <small>Ultima vez: {formatTime(item.last_seen)}</small>
+                  </button>
+                ))}
+                {reports.slice(0, 8).map((item) => (
+                  <button className="defender-item" key={item.path} onClick={() => setDetails({ type: 'Reporte', data: item })}>
+                    <span className="severity info">report</span>
+                    <strong>{item.name}</strong>
+                    <small>{formatTime(item.updated_at)} / {item.size} bytes</small>
                   </button>
                 ))}
               </div>

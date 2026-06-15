@@ -264,6 +264,7 @@ async function generateIncidentReport({target, alertId}){
   const timeline = await buildTimeline({ip, alertId, minutes:240});
   const safeName = `${new Date().toISOString().replace(/[:.]/g,'-')}-${(ip || alertId || 'incident').replace(/[^a-zA-Z0-9.-]/g,'_')}.md`;
   const reportPath = path.join(reportsDir, safeName);
+  const htmlPath = reportPath.replace(/\.md$/i, '.html');
   const lines = [
     '# SOCSentinel Incident Report',
     '',
@@ -292,7 +293,28 @@ async function generateIncidentReport({target, alertId}){
     '- Mantener este reporte como evidencia de investigacion.'
   ].filter((line)=>line !== '');
   fs.writeFileSync(reportPath, lines.join('\n'), 'utf8');
-  return reportPath;
+  const html = `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>SOCSentinel Incident Report</title>
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:#f6f8fb;color:#111827;margin:40px}
+    main{background:#fff;border:1px solid #d8dee9;border-radius:10px;max-width:980px;margin:auto;padding:34px}
+    h1{margin-top:0;color:#0f172a} h2{border-bottom:1px solid #e5e7eb;padding-bottom:6px}
+    li{margin:7px 0}.meta{color:#475569}.sev{color:#b91c1c;font-weight:700}
+    @media print{body{background:#fff;margin:0}main{border:0}}
+  </style>
+</head>
+<body><main>${lines.map((line)=>{
+    if(line.startsWith('# ')) return `<h1>${line.slice(2)}</h1>`;
+    if(line.startsWith('## ')) return `<h2>${line.slice(3)}</h2>`;
+    if(line.startsWith('- ')) return `<li>${line.slice(2)}</li>`;
+    if(!line) return '';
+    return `<p class="meta">${line}</p>`;
+  }).join('\n')}</main></body></html>`;
+  fs.writeFileSync(htmlPath, html, 'utf8');
+  return `${reportPath}\nReporte imprimible/PDF-ready: ${htmlPath}`;
 }
 
 async function hasRecentDuplicateAlert(alert){
@@ -425,11 +447,16 @@ app.get('/api/attacks', async (_,res)=>{
   for(const row of r.rows){
     const intel = await getIpIntel(row.source_ip);
     const alertSeverity = await pool.query(
-      `SELECT severity FROM alerts WHERE source_ip=$1 AND created_at > now() - interval '24 hours'
-       ORDER BY CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC LIMIT 1`,
+      `SELECT severity, created_at FROM alerts WHERE source_ip=$1 AND created_at > now() - interval '24 hours'
+       ORDER BY CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, created_at DESC LIMIT 1`,
       [row.source_ip]
     );
-    items.push({...row, intel, severity:alertSeverity.rows[0]?.severity || (row.ports >= 5 ? 'high' : 'info')});
+    const severity = alertSeverity.rows[0]?.severity || (row.ports >= 5 ? 'high' : 'info');
+    const lastSeenMs = new Date(row.last_seen).getTime();
+    const alertMs = alertSeverity.rows[0]?.created_at ? new Date(alertSeverity.rows[0].created_at).getTime() : 0;
+    const recentWindowMs = 10 * 60 * 1000;
+    const isAttack = ['critical','high'].includes(severity) && (Date.now() - Math.max(lastSeenMs, alertMs) <= recentWindowMs);
+    items.push({...row, intel, severity, is_attack:isAttack});
   }
   res.json(items);
 });
@@ -440,6 +467,70 @@ app.get('/api/ip/:ip/intel', async (req,res)=>{
 app.get('/api/timeline', async (req,res)=>{
   const timeline = await buildTimeline({ip:String(req.query.ip || ''), alertId:String(req.query.alertId || ''), minutes:Number(req.query.minutes || 120)});
   res.json(timeline);
+});
+app.get('/api/mitre/coverage', async (_,res)=>{
+  const r = await pool.query(
+    `SELECT coalesce(mitre,'Sin MITRE') AS technique, count(*)::int AS alerts,
+            max(created_at) AS last_seen,
+            max(CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) AS max_rank
+     FROM alerts
+     GROUP BY coalesce(mitre,'Sin MITRE')
+     ORDER BY max_rank DESC, alerts DESC`
+  );
+  res.json(r.rows);
+});
+app.get('/api/reports', async (_,res)=>{
+  const reportsDir = path.join(projectRoot, 'reports');
+  if(!fs.existsSync(reportsDir)) return res.json([]);
+  const files = fs.readdirSync(reportsDir)
+    .filter((name)=>/\.(md|html)$/i.test(name))
+    .map((name)=>{
+      const full = path.join(reportsDir, name);
+      const stat = fs.statSync(full);
+      return {name, path:full, size:stat.size, updated_at:stat.mtime};
+    })
+    .sort((a,b)=>new Date(b.updated_at)-new Date(a.updated_at));
+  res.json(files);
+});
+app.get('/api/quarantine', async (_,res)=>{
+  const quarantineDir = path.join(process.env.ProgramData || 'C:\\ProgramData', 'SOCSentinel', 'Quarantine');
+  if(!fs.existsSync(quarantineDir)) return res.json({path:quarantineDir, items:[]});
+  const items = fs.readdirSync(quarantineDir)
+    .map((name)=>{
+      const full = path.join(quarantineDir, name);
+      const stat = fs.statSync(full);
+      return {name, path:full, size:stat.size, created_at:stat.birthtime, updated_at:stat.mtime};
+    })
+    .sort((a,b)=>new Date(b.updated_at)-new Date(a.updated_at));
+  res.json({path:quarantineDir, items});
+});
+app.get('/api/pro/status', async (_,res)=>{
+  const [mitre, reports, actions] = await Promise.all([
+    pool.query("SELECT count(DISTINCT mitre)::int AS total FROM alerts WHERE mitre IS NOT NULL AND mitre <> ''"),
+    Promise.resolve(fs.existsSync(path.join(projectRoot, 'reports')) ? fs.readdirSync(path.join(projectRoot, 'reports')).filter((name)=>/\.(md|html)$/i.test(name)).length : 0),
+    pool.query('SELECT count(*)::int AS total FROM actions')
+  ]);
+  res.json({
+    ok:true,
+    auth:{mode:'local-env', enabled:Boolean(process.env.SOC_USERNAME || process.env.SOC_PASSWORD), user:process.env.SOC_USERNAME || 'analyst'},
+    windowsService:{installer:'scripts/install_windows_service.ps1', uninstall:'scripts/uninstall_windows_service.ps1'},
+    quarantine:{mode:'local', path:path.join(process.env.ProgramData || 'C:\\ProgramData', 'SOCSentinel', 'Quarantine')},
+    reports:{mode:'markdown-html', count:reports},
+    mitre:{techniques:mitre.rows[0].total},
+    evtx:{importer:'scripts/import_evtx.ps1'},
+    sigmaYara:{mode:'local-rule-pack', paths:['rules/sigma-basic.json','rules/yara-basic.yar']},
+    actions:actions.rows[0].total
+  });
+});
+app.post('/api/auth/login', async (req,res)=>{
+  const username = String(req.body?.username || '');
+  const password = String(req.body?.password || '');
+  const expectedUser = process.env.SOC_USERNAME || 'analyst';
+  const expectedPass = process.env.SOC_PASSWORD || process.env.RESPONSE_SHARED_SECRET || 'change-this-secret';
+  if(username === expectedUser && password === expectedPass){
+    return res.json({ok:true, user:{username:expectedUser, role:'SOC Analyst'}});
+  }
+  res.status(401).json({ok:false, error:'credenciales invalidas'});
 });
 app.get('/api/email/threats', async (_,res)=>{
   const r=await pool.query('SELECT * FROM email_threats ORDER BY created_at DESC LIMIT 100');
@@ -659,7 +750,7 @@ app.post('/api/actions/:type', async (req,res)=>{
       return res.json(r.rows[0]);
     }
   }
-  const scriptMap={ block_ip:'block_ip.ps1', unblock_ip:'unblock_ip.ps1', block_port:'block_port.ps1', isolate_host:'isolate_host.ps1', defender_scan:'defender_scan.ps1', locate_malware:'locate_malware.ps1', remove_malware:'remove_malware.ps1', kill_process:'kill_process.ps1', enable_firewall_logging:'enable_firewall_logging.ps1', disable_firewall_logging:'disable_firewall_logging.ps1' };
+  const scriptMap={ block_ip:'block_ip.ps1', unblock_ip:'unblock_ip.ps1', block_port:'block_port.ps1', isolate_host:'isolate_host.ps1', defender_scan:'defender_scan.ps1', locate_malware:'locate_malware.ps1', remove_malware:'remove_malware.ps1', quarantine_file:'quarantine_file.ps1', kill_process:'kill_process.ps1', enable_firewall_logging:'enable_firewall_logging.ps1', disable_firewall_logging:'disable_firewall_logging.ps1' };
   const script=scriptMap[req.params.type];
   if(!script) return res.status(400).json({error:'acción no soportada'});
   const scriptPath=path.join(projectRoot,'scripts',script);

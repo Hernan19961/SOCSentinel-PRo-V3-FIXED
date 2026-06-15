@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Suspicious PowerShell EncodedCommand",
+    "severity": "high",
+    "mitre": "T1059.001",
+    "field": "command_line",
+    "contains": ["-enc", "encodedcommand"]
+  },
+  {
+    "name": "Common LOLBin Execution",
+    "severity": "high",
+    "mitre": "T1218",
+    "field": "process",
+    "contains": ["rundll32.exe", "regsvr32.exe", "mshta.exe", "certutil.exe", "bitsadmin.exe"]
+  }
+]
