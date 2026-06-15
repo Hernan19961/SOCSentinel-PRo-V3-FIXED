@@ -20,14 +20,18 @@ const io = new Server(server, { cors:{ origin:'*' }});
 app.use(cors()); app.use(express.json({limit:'10mb'}));
 app.get('/api/health', (_,res)=>res.json({ok:true, name:'SOCSentinel Pro V3', mode:'real-time-ready', responseActions: process.env.ALLOW_RESPONSE_ACTIONS === 'true'}));
 app.get('/api/local-assets', (_,res)=>res.json({
-  hostname: os.hostname(),
+  hostname: localAssetCache.hostname,
   localIps: trustedLocalIps(),
-  interfaces: os.networkInterfaces()
+  interfaces: localAssetCache.interfaces,
+  refreshedAt: localAssetCache.refreshedAt
 }));
 const seenFirewallLines = new Set();
 let lastFirewallError = '';
 const dataDir = path.join(projectRoot, 'backend', 'data');
 const defenderDismissedPath = path.join(dataDir, 'defender-dismissed.json');
+let localAssetCache = {hostname: os.hostname(), ips: [], interfaces: {}, refreshedAt: null};
+let correlationTimer = null;
+let correlationRunning = false;
 
 const riskyAttachmentExt = ['.exe','.scr','.bat','.cmd','.ps1','.vbs','.js','.jse','.wsf','.hta','.iso','.img','.lnk','.docm','.xlsm','.zip','.rar','.7z','.html','.htm'];
 const shortenerDomains = ['bit.ly','tinyurl.com','t.co','goo.gl','ow.ly','is.gd','buff.ly','cutt.ly','rebrand.ly','lnkd.in'];
@@ -130,11 +134,29 @@ function normalizeIpValue(ip){
     .trim()
     .toLowerCase()
     .replace(/^::ffff:/, '')
-    .replace(/%.+$/, '');
+    .replace(/%.+$/, '')
+    .replace(/^\[|\]$/g, '');
+}
+
+function refreshLocalAssets(){
+  const interfaces = os.networkInterfaces();
+  const ips = Object.values(interfaces)
+    .flat()
+    .filter(Boolean)
+    .map((item)=>normalizeIpValue(item.address))
+    .filter(Boolean);
+  localAssetCache = {
+    hostname: process.env.SOC_HOSTNAME || os.hostname() || process.env.COMPUTERNAME || 'SOCSentinel',
+    ips: [...new Set(['127.0.0.1', '::1', ...ips])],
+    interfaces,
+    refreshedAt: new Date().toISOString()
+  };
+  return localAssetCache;
 }
 
 function trustedLocalIps(){
-  return [...new Set(localIps().map(normalizeIpValue).filter(Boolean))];
+  if(!localAssetCache.refreshedAt) refreshLocalAssets();
+  return localAssetCache.ips;
 }
 
 function isOwnDeviceIp(ip){
@@ -480,6 +502,9 @@ async function ingestRawEvents(payload){
   const created=[];
   for(const raw of items){
     const e = normalize(raw);
+    e.sourceIp = normalizeIpValue(e.sourceIp);
+    e.destinationIp = normalizeIpValue(e.destinationIp);
+    if(isOwnDeviceIp(e.sourceIp) && (!e.destinationIp || isOwnDeviceIp(e.destinationIp))) continue;
     const ev = await pool.query(
       `INSERT INTO events(event_id,provider,hostname,username,process,command_line,source_ip,source_port,destination_ip,destination_port,protocol,file_path,raw)
        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
@@ -500,8 +525,42 @@ async function ingestRawEvents(payload){
       created.push(al.rows[0]);
     }
   }
-  await runCorrelation(io).catch(()=>{});
+  scheduleCorrelation();
   return created;
+}
+
+function scheduleCorrelation(){
+  if(correlationTimer) return;
+  correlationTimer = setTimeout(async ()=>{
+    correlationTimer = null;
+    if(correlationRunning) return scheduleCorrelation();
+    correlationRunning = true;
+    try {
+      await runCorrelation(io, {localIps: trustedLocalIps()});
+    } catch {
+      // Correlation is secondary; ingestion must stay realtime.
+    } finally {
+      correlationRunning = false;
+    }
+  }, 1200);
+}
+
+async function cleanupLocalNoiseAlerts(){
+  const localAddresses = trustedLocalIps();
+  if(!localAddresses.length) return 0;
+  const result = await pool.query(
+    `DELETE FROM alerts
+     WHERE title='Posible escaneo de puertos'
+       AND source_ip IS NOT NULL
+       AND (
+         regexp_replace(lower(source_ip), '%.*$', '') = ANY($1::text[])
+         OR lower(source_ip) LIKE 'fe80:%'
+       )
+     RETURNING id`,
+    [localAddresses]
+  );
+  for(const row of result.rows) io.emit('alert:delete',{id:row.id});
+  return result.rowCount;
 }
 
 app.post('/api/events', async (req,res)=>{
@@ -534,7 +593,7 @@ app.get('/api/network', async (_,res)=>{
                 FROM events
                 WHERE source_ip IS NOT NULL
                   AND source_ip <> ''
-                  AND NOT (source_ip = ANY($1::text[]))
+                  AND NOT (regexp_replace(lower(source_ip), '%.*$', '') = ANY($1::text[]))
                   AND NOT (source_ip = ANY($2::text[]))
                   AND destination_port IS NOT NULL
                   AND destination_port NOT IN (137,138,1900,5353)
@@ -574,7 +633,7 @@ app.get('/api/attacks', async (_,res)=>{
      FROM events
      WHERE source_ip IS NOT NULL
        AND source_ip <> ''
-       AND NOT (source_ip = ANY($1::text[]))
+       AND NOT (regexp_replace(lower(source_ip), '%.*$', '') = ANY($1::text[]))
        AND created_at > now() - interval '24 hours'
      GROUP BY source_ip
      ORDER BY last_seen DESC
@@ -953,7 +1012,15 @@ app.post('/api/actions/:type', async (req,res)=>{
   });
 });
 const port=process.env.PORT||4000; server.listen(port,()=>{
+  refreshLocalAssets();
   console.log(`SOCSentinel Pro V3 API on ${port}`);
+  console.log(`Local assets: ${localAssetCache.hostname} ${localAssetCache.ips.join(', ')}`);
+  setInterval(refreshLocalAssets, 60000);
+  cleanupLocalNoiseAlerts().then((count)=>{
+    if(count) console.log(`Cleaned local false-positive scan alerts: ${count}`);
+  }).catch(()=>{});
   seedFirewallBaseline();
-  setInterval(()=>pollFirewallLog().catch(()=>{}), 3000);
+  if(process.env.ENABLE_BACKEND_FIREWALL_POLL === 'true'){
+    setInterval(()=>pollFirewallLog().catch(()=>{}), 5000);
+  }
 });

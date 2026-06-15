@@ -7,13 +7,13 @@ import { execFile } from 'child_process';
 import fetch from 'node-fetch';
 const API=process.env.SOCSENTINEL_API||'http://127.0.0.1:4000/api/events';
 const HEALTH=API.replace(/\/api\/events\/?$/,'/api/health');
-const POLL=Number(process.env.POLL_SECONDS||5)*1000;
-const BATCH_SIZE=Number(process.env.BATCH_SIZE||10);
+const POLL=Number(process.env.POLL_SECONDS||2)*1000;
+const BATCH_SIZE=Number(process.env.BATCH_SIZE||25);
 let lastRecordId=0;
 let backendOnline=false;
 const seenFirewallLines = new Set();
 function ps(){
-return `$logs=@('Security','Microsoft-Windows-Sysmon/Operational');$out=@();foreach($l in $logs){try{$ev=Get-WinEvent -LogName $l -MaxEvents 40 -ErrorAction Stop | Where-Object {$_.Id -in 1,3,6,11,4624,4625,4688,4720,4724,4732,5152,5156,5157,5158,7045} | Select-Object TimeCreated,Id,RecordId,ProviderName,MachineName,Message;$out+=$ev}catch{}};$out|Sort-Object RecordId|ConvertTo-Json -Depth 4`;
+return `$logs=@('Security','Microsoft-Windows-Sysmon/Operational');$out=@();foreach($l in $logs){try{$ev=Get-WinEvent -LogName $l -MaxEvents 80 -ErrorAction Stop | Where-Object {$_.Id -in 1,3,6,11,4624,4625,4688,4720,4724,4732,5152,5156,5157,5158,7045} | Select-Object TimeCreated,Id,RecordId,ProviderName,MachineName,Message;$out+=$ev}catch{}};$out|Sort-Object RecordId|ConvertTo-Json -Depth 4`;
 }
 function firewallPs(){
 return `$path="$env:SystemRoot\\System32\\LogFiles\\Firewall\\pfirewall.log";if(Test-Path $path){Get-Content $path -Tail 250 | Where-Object {$_ -and $_ -notlike '#*'} | ConvertTo-Json -Depth 2}`;
@@ -98,5 +98,34 @@ function readEvents(){
   if(fresh.length) await sendEvents(fresh,'firewall events');
  });
 }
+function seedBaselines(){
+ return new Promise((resolve)=>{
+  let pending=2;
+  const done=()=>{ pending-=1; if(pending<=0) resolve(); };
+  runPowerShell(ps(),(err,stdout)=>{
+   if(!err && stdout.trim()){
+    try{
+     let data=JSON.parse(stdout); if(!Array.isArray(data)) data=[data];
+     lastRecordId=Math.max(...data.map(e=>Number(e.RecordId)||0),lastRecordId);
+     console.log('event baseline record',lastRecordId);
+    }catch{}
+   }
+   done();
+  });
+  runPowerShell(firewallPs(),(err,stdout)=>{
+   if(!err && stdout.trim()){
+    try{
+     let lines=JSON.parse(stdout); if(!Array.isArray(lines)) lines=[lines];
+     for(const line of lines){
+      const key=String(line||'').trim();
+      if(key) seenFirewallLines.add(key);
+     }
+     console.log('firewall baseline lines',seenFirewallLines.size);
+    }catch{}
+   }
+   done();
+  });
+ });
+}
 console.log('SOCSentinel Windows Agent running. API:',API);
-checkBackend().then(()=>{setInterval(readEvents,POLL); readEvents();});
+checkBackend().then(async()=>{await seedBaselines(); setInterval(readEvents,POLL); readEvents();});

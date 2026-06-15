@@ -59,9 +59,11 @@ CREATE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
 CREATE INDEX IF NOT EXISTS idx_events_hostname ON events(hostname);
 CREATE INDEX IF NOT EXISTS idx_events_source_ip ON events(source_ip);
 CREATE INDEX IF NOT EXISTS idx_events_destination_port ON events(destination_port);
+CREATE INDEX IF NOT EXISTS idx_events_source_time_port ON events(source_ip, created_at DESC, destination_port);
 CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity);
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
+CREATE INDEX IF NOT EXISTS idx_alerts_source_time ON alerts(source_ip, created_at DESC);
 CREATE TABLE IF NOT EXISTS incident_alerts (incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE, alert_id UUID REFERENCES alerts(id) ON DELETE CASCADE, PRIMARY KEY(incident_id, alert_id));
 CREATE TABLE IF NOT EXISTS actions (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

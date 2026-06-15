@@ -1,14 +1,4 @@
 import { pool } from '../db/pool.js';
-import os from 'os';
-
-function localIps(){
-  return Object.values(os.networkInterfaces())
-    .flat()
-    .filter(Boolean)
-    .map((item)=>item.address)
-    .filter(Boolean);
-}
-
 function normalizeIpValue(ip){
   return String(ip || '')
     .trim()
@@ -18,14 +8,10 @@ function normalizeIpValue(ip){
 }
 
 function ownDeviceIps(){
-  return [...new Set([
-    '127.0.0.1',
-    '::1',
-    ...localIps().map(normalizeIpValue).filter(Boolean)
-  ])];
+  return ['127.0.0.1', '::1'];
 }
 
-export async function runCorrelation(io){
+export async function runCorrelation(io, options = {}){
   const brute = await pool.query(`SELECT hostname, username, count(*)::int AS fails FROM events WHERE event_id=4625 AND created_at > now() - interval '10 minutes' GROUP BY hostname, username HAVING count(*) >= 5`);
   for(const row of brute.rows){
     const activeDuplicate = await pool.query(`SELECT id FROM alerts WHERE title=$1 AND hostname=$2 AND username=$3 AND created_at > now() - interval '10 minutes' LIMIT 1`,['Posible fuerza bruta en curso',row.hostname,row.username]);
@@ -42,7 +28,7 @@ export async function runCorrelation(io){
     }
   }
 
-  const localAddresses = ownDeviceIps();
+  const localAddresses = [...new Set([...(options.localIps || []), ...ownDeviceIps()].map(normalizeIpValue).filter(Boolean))];
   const blocked = await pool.query("SELECT ip FROM blocked_ips WHERE status='blocked'");
   const blockedIps = blocked.rows.map((row)=>row.ip);
   const scans = await pool.query(`
@@ -59,7 +45,7 @@ export async function runCorrelation(io){
       AND source_ip <> ''
       AND destination_port IS NOT NULL
       AND destination_port NOT IN (137,138,1900,5353)
-      AND NOT (source_ip = ANY($1::text[]))
+      AND NOT (regexp_replace(lower(source_ip), '%.*$', '') = ANY($1::text[]))
       AND NOT (source_ip = ANY($2::text[]))
       AND (destination_ip IS NULL OR (
         destination_ip NOT LIKE '224.%'

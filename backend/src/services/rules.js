@@ -108,7 +108,11 @@ function cleanValue(value){
 }
 
 function cleanIp(value){
-  const cleaned = cleanValue(value);
+  const cleaned = cleanValue(value)
+    .toLowerCase()
+    .replace(/^::ffff:/, '')
+    .replace(/%.+$/, '')
+    .replace(/^\[|\]$/g, '');
   if(!cleaned || cleaned === '::1' || cleaned === '127.0.0.1' || cleaned === '0.0.0.0') return '';
   return cleaned;
 }

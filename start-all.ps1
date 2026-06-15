@@ -79,8 +79,8 @@ function Normalize-AgentEnv {
   $envFile = Join-Path $AgentDir ".env"
   Ensure-Env $AgentDir
   Set-EnvValue -EnvFile $envFile -Key "SOCSENTINEL_API" -Value "http://127.0.0.1:4000/api/events"
-  Set-EnvValue -EnvFile $envFile -Key "POLL_SECONDS" -Value "5"
-  Set-EnvValue -EnvFile $envFile -Key "BATCH_SIZE" -Value "10"
+  Set-EnvValue -EnvFile $envFile -Key "POLL_SECONDS" -Value "2"
+  Set-EnvValue -EnvFile $envFile -Key "BATCH_SIZE" -Value "25"
 }
 
 function Start-SOCWindow {
