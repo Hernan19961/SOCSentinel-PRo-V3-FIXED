@@ -50,9 +50,11 @@ export async function runCorrelation(io){
         AND destination_ip NOT LIKE 'ff%'
         AND destination_ip <> '255.255.255.255'
       ))
-      AND created_at > now() - interval '2 minutes'
+      AND created_at > now() - interval '5 minutes'
     GROUP BY source_ip, hostname
-    HAVING (count(*) >= 8 AND count(DISTINCT destination_port) >= 3) OR count(DISTINCT destination_port) >= 5
+    HAVING (count(*) >= 8 AND count(DISTINCT destination_port) >= 3)
+        OR (count(*) >= 25 AND count(DISTINCT destination_port) >= 2)
+        OR count(DISTINCT destination_port) >= 5
   `, [localAddresses, blockedIps]);
 
   for(const row of scans.rows){
@@ -67,7 +69,7 @@ export async function runCorrelation(io){
       attempts: row.attempts,
       ports: row.ports,
       port_list: row.port_list,
-      window: '2 minutes',
+      window: '5 minutes',
       last_seen: row.last_seen
     };
     const alert = await pool.query(

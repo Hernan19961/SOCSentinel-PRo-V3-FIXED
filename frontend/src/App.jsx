@@ -15,7 +15,6 @@ import {
   Mail,
   MapPin,
   Network,
-  PackageCheck,
   Radar,
   RefreshCw,
   ScanLine,
@@ -40,7 +39,6 @@ const modules = [
   { id: 'network', label: 'Network', icon: Network },
   { id: 'email', label: 'Email', icon: Mail },
   { id: 'defender', label: 'Defender', icon: ShieldCheck },
-  { id: 'pro', label: 'SOC Pro', icon: PackageCheck },
   { id: 'hunt', label: 'Hunting', icon: Crosshair },
   { id: 'malware', label: 'Malware', icon: Skull },
   { id: 'response', label: 'Respuesta', icon: Ban },
@@ -124,10 +122,6 @@ function App() {
   const [attacks, setAttacks] = useState([]);
   const [timeline, setTimeline] = useState([]);
   const [selectedIntel, setSelectedIntel] = useState(null);
-  const [proStatus, setProStatus] = useState(null);
-  const [mitreCoverage, setMitreCoverage] = useState([]);
-  const [reports, setReports] = useState([]);
-  const [quarantine, setQuarantine] = useState({ path: '', items: [] });
   const [blockedIps, setBlockedIps] = useState([]);
   const [stats, setStats] = useState(null);
   const [health, setHealth] = useState(null);
@@ -136,6 +130,9 @@ function App() {
   const [severity, setSeverity] = useState('all');
   const [details, setDetails] = useState(null);
   const [alarmAckAt, setAlarmAckAt] = useState(0);
+  const [session, setSession] = useState(() => JSON.parse(localStorage.getItem('socsentinel-session') || 'null'));
+  const [loginForm, setLoginForm] = useState({ username: 'hernan', password: '' });
+  const [loginError, setLoginError] = useState('');
   const [consoleLines, setConsoleLines] = useState([
     '[boot] SOCSentinel Pro iniciado',
     '[mode] Respuesta real activa si backend corre como administrador y el secreto coincide',
@@ -156,8 +153,33 @@ function App() {
     setConsoleLines((current) => [`[${new Date().toLocaleTimeString()}] ${line}`, ...current].slice(0, 80));
   }
 
+  async function login(event) {
+    event.preventDefault();
+    setLoginError('');
+    try {
+      const response = await fetch(`${API}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(loginForm),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || 'credenciales invalidas');
+      localStorage.setItem('socsentinel-session', JSON.stringify(result.user));
+      setSession(result.user);
+      pushConsole(`login: ${result.user.username}`);
+      load();
+    } catch (error) {
+      setLoginError(error.message);
+    }
+  }
+
+  function logout() {
+    localStorage.removeItem('socsentinel-session');
+    setSession(null);
+  }
+
   async function load() {
-    const [nextAlerts, nextEvents, nextActions, nextStats, nextHealth, nextNetwork, nextBlockedIps, nextEmailThreats, nextDefender, nextAttacks, nextPro, nextMitre, nextReports, nextQuarantine] = await Promise.all([
+    const [nextAlerts, nextEvents, nextActions, nextStats, nextHealth, nextNetwork, nextBlockedIps, nextEmailThreats, nextDefender, nextAttacks] = await Promise.all([
       getJson('/api/alerts', []),
       getJson('/api/events', []),
       getJson('/api/actions', []),
@@ -168,10 +190,6 @@ function App() {
       getJson('/api/email/threats', []),
       getJson('/api/defender/status', null),
       getJson('/api/attacks', []),
-      getJson('/api/pro/status', null),
-      getJson('/api/mitre/coverage', []),
-      getJson('/api/reports', []),
-      getJson('/api/quarantine', { path: '', items: [] }),
     ]);
     setAlerts(nextAlerts);
     setEvents(nextEvents);
@@ -183,10 +201,6 @@ function App() {
     setEmailThreats(nextEmailThreats);
     setDefender(nextDefender);
     setAttacks(nextAttacks);
-    setProStatus(nextPro);
-    setMitreCoverage(nextMitre);
-    setReports(nextReports);
-    setQuarantine(nextQuarantine);
   }
 
   useEffect(() => {
@@ -442,6 +456,35 @@ function App() {
   };
   const activeAttacks = useMemo(() => attacks.filter((attack) => attack.is_attack), [attacks]);
 
+  if (!session) {
+    return (
+      <main className="login-shell">
+        <form className="login-panel" onSubmit={login}>
+          <div className="brand login-brand">
+            <Shield size={30} />
+            <div>
+              <strong>SOCSentinel</strong>
+              <span>Secure analyst login</span>
+            </div>
+          </div>
+          <label>
+            Usuario
+            <input value={loginForm.username} onChange={(event) => setLoginForm({ ...loginForm, username: event.target.value })} autoComplete="username" />
+          </label>
+          <label>
+            Contraseña
+            <input type="password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} autoComplete="current-password" />
+          </label>
+          {loginError && <p className="login-error">{loginError}</p>}
+          <button className="tool" type="submit">
+            <ShieldCheck size={16} />
+            Ingresar
+          </button>
+        </form>
+      </main>
+    );
+  }
+
   return (
     <main className={activeAlarm ? 'shell alarm-mode' : 'shell'}>
       <aside className="rail">
@@ -476,6 +519,7 @@ function App() {
             <h1>SIEM local para Windows, Sysmon, eventos, alertas y respuesta</h1>
           </div>
           <div className="top-actions">
+            <button className="tool" onClick={logout}>Salir</button>
             <input value={secret} onChange={(event) => setSecret(event.target.value)} placeholder="Shared secret" />
             <button className="icon-btn" onClick={load} title="Actualizar">
               <RefreshCw size={18} />
@@ -609,7 +653,7 @@ function App() {
                     <ActionButton icon={FileSearch} label="Ubicar malware" onClick={() => action('locate_malware', fileTarget(alert), alert.id)} disabled={!fileTarget(alert)} />
                     <ActionButton icon={ScanLine} label="Defender" onClick={() => action('defender_scan', scanTarget(alert), alert.id)} />
                     <ActionButton icon={Trash2} label="Matar proceso" danger onClick={() => action('kill_process', fileTarget(alert), alert.id)} disabled={!fileTarget(alert) || isEmailAlert(alert)} />
-                    <ActionButton icon={PackageCheck} label="Cuarentena" danger onClick={() => action('quarantine_file', fileTarget(alert), alert.id)} disabled={!fileTarget(alert) || isEmailAlert(alert)} />
+                    <ActionButton icon={FileSearch} label="Cuarentena" danger onClick={() => action('quarantine_file', fileTarget(alert), alert.id)} disabled={!fileTarget(alert) || isEmailAlert(alert)} />
                     <ActionButton icon={Trash2} label="Remediar" danger onClick={() => action('remove_malware', fileTarget(alert), alert.id)} disabled={!fileTarget(alert)} />
                     <ActionButton icon={FileText} label="Reporte" onClick={() => action('generate_report', alert.source_ip || alert.id, alert.id)} />
                     <ActionButton icon={Trash2} label="Borrar alerta" onClick={() => removeAlert(alert.id)} />
@@ -789,70 +833,6 @@ function App() {
                     <strong>{item.title || item.code}</strong>
                     <small>{formatTime(item.created_at)} / {item.hostname || '-'} / {item.process || '-'}</small>
                     <small>{item.source_ip || '-'} {item.destination_port ? `:${item.destination_port}` : ''}</small>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </section>
-        )}
-
-        {active === 'pro' && (
-          <section className="layout two">
-            <div className="panel">
-              <div className="panel-head">
-                <h2>SOC Professional Pack</h2>
-                <span>servicio, auth, reportes, EVTX, Sigma/YARA</span>
-              </div>
-              <div className="defender-grid">
-                <article className="defender-card ok">
-                  <span>Auth local</span>
-                  <strong>{proStatus?.auth?.enabled ? 'Activo' : 'Listo'}</strong>
-                  <small>{proStatus?.auth?.user || 'analyst'} / env SOC_USERNAME</small>
-                </article>
-                <article className="defender-card ok">
-                  <span>MITRE ATT&CK</span>
-                  <strong>{proStatus?.mitre?.techniques ?? 0}</strong>
-                  <small>tecnicas observadas</small>
-                </article>
-                <article className="defender-card ok">
-                  <span>Reportes</span>
-                  <strong>{reports.length}</strong>
-                  <small>MD + HTML imprimible a PDF</small>
-                </article>
-                <article className="defender-card ok">
-                  <span>Cuarentena</span>
-                  <strong>{quarantine.items?.length ?? 0}</strong>
-                  <small>{shortText(quarantine.path, 54)}</small>
-                </article>
-              </div>
-              <div className="defender-section">
-                <h3>Instalacion Windows</h3>
-                <div className="defender-kv">
-                  <span>Instalar servicio/tarea</span><strong>{proStatus?.windowsService?.installer || 'scripts/install_windows_service.ps1'}</strong>
-                  <span>Desinstalar</span><strong>{proStatus?.windowsService?.uninstall || 'scripts/uninstall_windows_service.ps1'}</strong>
-                  <span>Importar EVTX</span><strong>{proStatus?.evtx?.importer || 'scripts/import_evtx.ps1'}</strong>
-                  <span>Sigma/YARA</span><strong>{(proStatus?.sigmaYara?.paths || []).join(' / ')}</strong>
-                </div>
-              </div>
-            </div>
-            <div className="panel">
-              <div className="panel-head">
-                <h2>Cobertura MITRE / Evidencia</h2>
-                <span>clasificacion y trazabilidad</span>
-              </div>
-              <div className="defender-list">
-                {mitreCoverage.slice(0, 18).map((item) => (
-                  <button className="defender-item" key={item.technique} onClick={() => setQuery(item.technique)}>
-                    <span className="severity high">{item.technique}</span>
-                    <strong>{item.alerts} alertas</strong>
-                    <small>Ultima vez: {formatTime(item.last_seen)}</small>
-                  </button>
-                ))}
-                {reports.slice(0, 8).map((item) => (
-                  <button className="defender-item" key={item.path} onClick={() => setDetails({ type: 'Reporte', data: item })}>
-                    <span className="severity info">report</span>
-                    <strong>{item.name}</strong>
-                    <small>{formatTime(item.updated_at)} / {item.size} bytes</small>
                   </button>
                 ))}
               </div>

@@ -43,6 +43,47 @@ button:disabled {
   opacity: 0.45;
 }
 
+.login-shell {
+  align-items: center;
+  background:
+    linear-gradient(90deg, rgba(76, 201, 240, 0.04) 1px, transparent 1px),
+    linear-gradient(rgba(76, 201, 240, 0.035) 1px, transparent 1px),
+    var(--bg);
+  background-size: 44px 44px;
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.login-panel {
+  background: rgba(13, 19, 32, 0.96);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+  display: grid;
+  gap: 14px;
+  max-width: 420px;
+  padding: 24px;
+  width: 100%;
+}
+
+.login-panel label {
+  color: var(--muted);
+  display: grid;
+  gap: 7px;
+  font-size: 13px;
+}
+
+.login-brand {
+  padding: 0 0 8px;
+}
+
+.login-error {
+  color: var(--red);
+  margin: 0;
+}
+
 .shell {
   display: grid;
   grid-template-columns: 250px minmax(0, 1fr);

@@ -672,7 +672,7 @@ function runPowerShellJson(scriptName, args = []){
 
 async function raiseDefenderAlerts(status){
   const detections = Array.isArray(status?.detections) ? status.detections : [];
-  const active = detections.filter((item)=>item.actionSuccess === false || ![3,4,5].includes(Number(item.threatStatusId)));
+  const active = detections.filter((item)=>item.actionSuccess === false);
   for(const item of active.slice(0, 10)){
     if(isBenignDefenderExplorerDetection(item)) continue;
     const resource = Array.isArray(item.resources) ? item.resources[0] : '';

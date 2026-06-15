@@ -53,6 +53,28 @@ function Set-EnvValue {
   Set-Content -Path $EnvFile -Value $next
 }
 
+function Set-EnvDefault {
+  param(
+    [string]$EnvFile,
+    [string]$Key,
+    [string]$Value
+  )
+  $content = @()
+  if (Test-Path $EnvFile) {
+    $content = Get-Content $EnvFile
+  }
+  if (!($content -match "^$([regex]::Escape($Key))=")) {
+    Add-Content -Path $EnvFile -Value "$Key=$Value"
+  }
+}
+
+function Normalize-BackendEnv {
+  $envFile = Join-Path $BackendDir ".env"
+  Ensure-Env $BackendDir
+  Set-EnvDefault -EnvFile $envFile -Key "SOC_USERNAME" -Value "hernan"
+  Set-EnvDefault -EnvFile $envFile -Key "SOC_PASSWORD" -Value "hernanxd123"
+}
+
 function Normalize-AgentEnv {
   $envFile = Join-Path $AgentDir ".env"
   Ensure-Env $AgentDir
@@ -131,7 +153,7 @@ Write-Host "SOCSentinel Pro - Lanzador unificado" -ForegroundColor Cyan
 Write-Host "Raiz: $Root" -ForegroundColor DarkGray
 Write-Host ""
 
-Ensure-Env $BackendDir
+Normalize-BackendEnv
 Normalize-AgentEnv
 
 if (!(Test-Path (Join-Path $BackendDir "node_modules"))) {
