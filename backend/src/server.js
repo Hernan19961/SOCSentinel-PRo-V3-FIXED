@@ -792,6 +792,20 @@ app.get('/api/defender/status', async (_,res)=>{
   res.json(status);
 });
 
+async function resolveExistingAlertId(alertId){
+  if(!alertId) return null;
+  const result = await pool.query('SELECT id FROM alerts WHERE id=$1 LIMIT 1', [alertId]);
+  return result.rowCount ? alertId : null;
+}
+
+async function insertActionRecord({ alertId, type, target, status, output }){
+  const existingAlertId = await resolveExistingAlertId(alertId);
+  return pool.query(
+    'INSERT INTO actions(alert_id,action_type,target,status,output) VALUES($1,$2,$3,$4,$5) RETURNING *',
+    [existingAlertId, type, target, status, output]
+  );
+}
+
 app.post('/api/actions/:type', async (req,res)=>{
   const allowed = process.env.ALLOW_RESPONSE_ACTIONS === 'true';
   let {target, alertId, secret}=req.body;
@@ -801,17 +815,17 @@ app.post('/api/actions/:type', async (req,res)=>{
   if(req.params.type === 'generate_report' && !target) target = alertId || 'manual';
   if(!target) return res.status(400).json({error:'target requerido'});
   if(!allowed || secret !== process.env.RESPONSE_SHARED_SECRET) {
-    const r=await pool.query('INSERT INTO actions(alert_id,action_type,target,status,output) VALUES($1,$2,$3,$4,$5) RETURNING *',[alertId||null,req.params.type,target,'audit-only','Acción registrada en modo auditoría. No se ejecutó en el sistema.']);
+    const r=await insertActionRecord({ alertId, type:req.params.type, target, status:'audit-only', output:'Acción registrada en modo auditoría. No se ejecutó en el sistema.' });
     return res.json(r.rows[0]);
   }
   if(req.params.type === 'generate_report'){
     try {
       const reportPath = await generateIncidentReport({target, alertId});
-      const r=await pool.query('INSERT INTO actions(alert_id,action_type,target,status,output) VALUES($1,$2,$3,$4,$5) RETURNING *',[alertId||null,req.params.type,target,'executed',`Reporte generado: ${reportPath}`]);
+      const r=await insertActionRecord({ alertId, type:req.params.type, target, status:'executed', output:`Reporte generado: ${reportPath}` });
       io.emit('action:new', r.rows[0]);
       return res.json(r.rows[0]);
     } catch (error) {
-      const r=await pool.query('INSERT INTO actions(alert_id,action_type,target,status,output) VALUES($1,$2,$3,$4,$5) RETURNING *',[alertId||null,req.params.type,target,'failed',error.message]);
+      const r=await insertActionRecord({ alertId, type:req.params.type, target, status:'failed', output:error.message });
       io.emit('action:new', r.rows[0]);
       return res.json(r.rows[0]);
     }
@@ -824,23 +838,29 @@ app.post('/api/actions/:type', async (req,res)=>{
     return res.status(500).json({error:`Script no encontrado: ${scriptPath}`});
   }
   execFile('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File',scriptPath,target], async (err, stdout, stderr)=>{
-    const status = err ? 'failed':'executed';
-    const output = (stdout||'') + (stderr||'') + (err?err.message:'');
-    const r=await pool.query('INSERT INTO actions(alert_id,action_type,target,status,output) VALUES($1,$2,$3,$4,$5) RETURNING *',[alertId||null,req.params.type,target,status,output]);
-    if(req.params.type === 'block_ip' && status === 'executed'){
-      await pool.query(
-        `INSERT INTO blocked_ips(ip,reason,status,last_action_id,updated_at)
-         VALUES($1,$2,'blocked',$3,now())
-         ON CONFLICT(ip) DO UPDATE SET status='blocked', reason=EXCLUDED.reason, last_action_id=EXCLUDED.last_action_id, updated_at=now()`,
-        [target, alertId ? `alert:${alertId}` : 'manual', r.rows[0].id]
-      );
-      io.emit('blocked_ip:update',{ip:target,status:'blocked'});
+    try {
+      const status = err ? 'failed':'executed';
+      const output = (stdout||'') + (stderr||'') + (err?err.message:'');
+      const r=await insertActionRecord({ alertId, type:req.params.type, target, status, output });
+      if(req.params.type === 'block_ip' && status === 'executed'){
+        await pool.query(
+          `INSERT INTO blocked_ips(ip,reason,status,last_action_id,updated_at)
+           VALUES($1,$2,'blocked',$3,now())
+           ON CONFLICT(ip) DO UPDATE SET status='blocked', reason=EXCLUDED.reason, last_action_id=EXCLUDED.last_action_id, updated_at=now()`,
+          [target, alertId ? `alert:${alertId}` : 'manual', r.rows[0].id]
+        );
+        io.emit('blocked_ip:update',{ip:target,status:'blocked'});
+      }
+      if(req.params.type === 'unblock_ip' && status === 'executed'){
+        await pool.query("UPDATE blocked_ips SET status='unblocked', last_action_id=$2, updated_at=now() WHERE ip=$1",[target, r.rows[0].id]);
+        io.emit('blocked_ip:update',{ip:target,status:'unblocked'});
+      }
+      io.emit('action:new', r.rows[0]);
+      if(!res.headersSent) res.json(r.rows[0]);
+    } catch (error) {
+      console.error('action failed', error);
+      if(!res.headersSent) res.status(500).json({ error:error.message });
     }
-    if(req.params.type === 'unblock_ip' && status === 'executed'){
-      await pool.query("UPDATE blocked_ips SET status='unblocked', last_action_id=$2, updated_at=now() WHERE ip=$1",[target, r.rows[0].id]);
-      io.emit('blocked_ip:update',{ip:target,status:'unblocked'});
-    }
-    io.emit('action:new', r.rows[0]); res.json(r.rows[0]);
   });
 });
 const port=process.env.PORT||4000; server.listen(port,()=>{
