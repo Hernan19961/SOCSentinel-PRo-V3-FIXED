@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+agent-windows/node_modules/
+
+# Local configuration and secrets
+.env
+*.env
+backend/.env
+frontend/.env
+agent-windows/.env
+
+# Build outputs
+frontend/dist/
+dist/
+build/
+
+# Runtime data and logs
+*.log
+pfirewall-debug.log
+reports/
+*.tmp
+*.bak
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

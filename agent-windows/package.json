@@ -1,0 +1,12 @@
+{
+  "name": "socsentinel-windows-agent",
+  "version": "3.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node agent.js"
+  },
+  "dependencies": {
+    "node-fetch": "latest",
+    "dotenv": "latest"
+  }
+}
