@@ -623,6 +623,35 @@ pre {
   animation: attack-pulse 1.4s infinite;
 }
 
+.attack-beam {
+  background: linear-gradient(90deg, rgba(255, 92, 122, 0), rgba(255, 92, 122, 0.95) 58%, #fff 78%, rgba(255, 92, 122, 0));
+  border-radius: 999px;
+  filter: drop-shadow(0 0 10px rgba(255, 92, 122, 0.78));
+  height: 3px;
+  opacity: 0.85;
+  pointer-events: none;
+  position: absolute;
+  transform-origin: 0 50%;
+  z-index: 1;
+  animation: attack-shot 1.15s infinite;
+}
+
+.attack-beam::after {
+  border-bottom: 5px solid transparent;
+  border-left: 11px solid #fff;
+  border-top: 5px solid transparent;
+  content: '';
+  position: absolute;
+  right: -4px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.attack-beam.info,
+.attack-beam.low {
+  opacity: 0.55;
+}
+
 .attack-dot.high,
 .attack-dot.critical {
   background: var(--red);
@@ -632,6 +661,24 @@ pre {
 @keyframes attack-pulse {
   50% {
     transform: scale(1.55);
+  }
+}
+
+@keyframes attack-shot {
+  0% {
+    clip-path: inset(0 100% 0 0);
+    opacity: 0;
+  }
+  18% {
+    opacity: 0.95;
+  }
+  72% {
+    clip-path: inset(0 0 0 0);
+    opacity: 0.95;
+  }
+  100% {
+    clip-path: inset(0 0 0 100%);
+    opacity: 0;
   }
 }
 
@@ -649,6 +696,19 @@ pre {
   position: absolute;
   transform: translateX(-50%);
   z-index: 3;
+}
+
+.home-node.under-attack {
+  border-color: rgba(255, 92, 122, 0.85);
+  color: #fff1f3;
+  box-shadow: 0 0 0 0 rgba(255, 92, 122, 0.6);
+  animation: home-impact 1.15s infinite;
+}
+
+@keyframes home-impact {
+  50% {
+    box-shadow: 0 0 0 9px rgba(255, 92, 122, 0.08), 0 0 24px rgba(255, 92, 122, 0.5);
+  }
 }
 
 .attack-feed,

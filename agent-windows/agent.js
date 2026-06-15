@@ -1,10 +1,16 @@
 import dotenv from 'dotenv';
-dotenv.config();
+import path from 'path';
+import { fileURLToPath } from 'url';
+const __dirname=path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({path:path.join(__dirname,'.env')});
 import { execFile } from 'child_process';
 import fetch from 'node-fetch';
-const API=process.env.SOCSENTINEL_API||'http://localhost:4000/api/events';
+const API=process.env.SOCSENTINEL_API||'http://127.0.0.1:4000/api/events';
+const HEALTH=API.replace(/\/api\/events\/?$/,'/api/health');
 const POLL=Number(process.env.POLL_SECONDS||5)*1000;
+const BATCH_SIZE=Number(process.env.BATCH_SIZE||10);
 let lastRecordId=0;
+let backendOnline=false;
 const seenFirewallLines = new Set();
 function ps(){
 return `$logs=@('Security','Microsoft-Windows-Sysmon/Operational');$out=@();foreach($l in $logs){try{$ev=Get-WinEvent -LogName $l -MaxEvents 40 -ErrorAction Stop | Where-Object {$_.Id -in 1,3,6,11,4624,4625,4688,4720,4724,4732,5152,5156,5157,5158,7045} | Select-Object TimeCreated,Id,RecordId,ProviderName,MachineName,Message;$out+=$ev}catch{}};$out|Sort-Object RecordId|ConvertTo-Json -Depth 4`;
@@ -19,14 +25,62 @@ function parseFirewallLine(line){
  if(!srcIp||!dstIp||!dstPort) return null;
  return {eventId:9001,provider:'Windows Firewall',hostname:process.env.COMPUTERNAME||'unknown',timestamp:`${date}T${time}`,sourceIp:srcIp,destinationIp:dstIp,sourcePort:Number(srcPort)||null,destinationPort:Number(dstPort)||null,protocol,action,rawMessage:line,raw:{date,time,action,protocol,srcIp,dstIp,srcPort,dstPort,size,tcpFlags,tcpSyn,tcpAck,tcpWin,icmpType,icmpCode,info,path}};
 }
+function trimEvent(event){
+ const rawMessage=String(event.rawMessage||'');
+ return {...event,rawMessage:rawMessage.slice(0,6000),commandLine:String(event.commandLine||'').slice(0,6000),raw:event.raw||{}};
+}
+function chunks(items,size){
+ const out=[];
+ for(let i=0;i<items.length;i+=size) out.push(items.slice(i,i+size));
+ return out;
+}
+async function checkBackend(){
+ try{
+  const response=await fetch(HEALTH,{timeout:4000});
+  backendOnline=response.ok;
+  if(!response.ok) console.error('backend health failed',response.status,response.statusText);
+ }catch(e){
+  backendOnline=false;
+  console.error('backend offline:',e.message || e.type || 'sin detalle');
+ }
+ return backendOnline;
+}
+async function sendEvents(events,label='events'){
+ if(!events.length) return;
+ if(!backendOnline && !(await checkBackend())) return;
+ for(const batch of chunks(events.map(trimEvent),BATCH_SIZE)){
+  try{
+   const response=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(batch),timeout:12000});
+   const text=await response.text();
+   if(!response.ok){
+    console.error(`${label} send http ${response.status}:`,text.slice(0,500));
+    backendOnline=false;
+    return;
+   }
+   console.log('sent',batch.length,label);
+  }catch(e){
+   backendOnline=false;
+   console.error(`${label} send failed:`,e.message || e.type || e.code || 'sin detalle');
+   return;
+  }
+ }
+}
+function runPowerShell(command,callback){
+ try{
+  execFile('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-Command',command],callback);
+ }catch(e){
+  callback(e,'','');
+ }
+}
 function readEvents(){
- execFile('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-Command',ps()],async(err,stdout)=>{
-  if(err||!stdout.trim()) return;
+ runPowerShell(ps(),async(err,stdout)=>{
+  if(err){ console.error('event log read failed:',err.message || err.code || 'sin detalle'); return; }
+  if(!stdout.trim()) return;
   let data=[]; try{data=JSON.parse(stdout); if(!Array.isArray(data)) data=[data];}catch{return;}
   const fresh=data.filter(e=>Number(e.RecordId)>lastRecordId).map(e=>({eventId:e.Id,provider:e.ProviderName,hostname:e.MachineName,recordId:e.RecordId,timestamp:e.TimeCreated,rawMessage:e.Message,raw:e,commandLine:e.Message}));
-  if(fresh.length){lastRecordId=Math.max(...fresh.map(e=>Number(e.recordId)||0),lastRecordId); try{await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fresh)}); console.log('sent',fresh.length,'events');}catch(e){console.error('send failed',e.message)}}
+  if(fresh.length){lastRecordId=Math.max(...fresh.map(e=>Number(e.recordId)||0),lastRecordId); await sendEvents(fresh,'events');}
  });
- execFile('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-Command',firewallPs()],async(err,stdout)=>{
+ runPowerShell(firewallPs(),async(err,stdout)=>{
   if(err){ console.error('firewall read failed - run agent as Administrator:', err.message); return; }
   if(!stdout.trim()) return;
   let lines=[]; try{lines=JSON.parse(stdout); if(!Array.isArray(lines)) lines=[lines];}catch{return;}
@@ -41,8 +95,8 @@ function readEvents(){
     seenFirewallLines.delete(first);
   }
   const fresh=freshLines.map(parseFirewallLine).filter(Boolean);
-  if(fresh.length){try{await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fresh)}); console.log('sent firewall',fresh.length,'events');}catch(e){console.error('firewall send failed',e.message)}}
+  if(fresh.length) await sendEvents(fresh,'firewall events');
  });
 }
 console.log('SOCSentinel Windows Agent running. API:',API);
-setInterval(readEvents,POLL); readEvents();
+checkBackend().then(()=>{setInterval(readEvents,POLL); readEvents();});

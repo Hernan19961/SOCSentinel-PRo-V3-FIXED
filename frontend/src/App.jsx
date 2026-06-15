@@ -702,17 +702,34 @@ function App() {
                   {attacks.slice(0, 18).map((attack, index) => {
                     const top = 12 + (Math.abs(Number(attack.intel?.latitude || 0)) % 68);
                     const left = 8 + (Math.abs(Number(attack.intel?.longitude || 0)) % 84);
+                    const homeTop = 86;
+                    const homeLeft = 50;
+                    const dx = homeLeft - left;
+                    const dy = homeTop - top;
+                    const length = Math.sqrt(dx * dx + dy * dy);
+                    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
                     return (
-                      <button
-                        className={`attack-dot ${attack.severity || 'info'}`}
-                        key={attack.source_ip}
-                        style={{ top: `${top}%`, left: `${left}%`, animationDelay: `${index * 0.12}s` }}
-                        title={`${attack.source_ip} ${attack.intel?.country || ''}`}
-                        onClick={() => inspectIp(attack.source_ip)}
-                      />
+                      <React.Fragment key={attack.source_ip}>
+                        <span
+                          className={`attack-beam ${attack.severity || 'info'}`}
+                          style={{
+                            top: `${top}%`,
+                            left: `${left}%`,
+                            width: `${length}%`,
+                            transform: `rotate(${angle}deg)`,
+                            animationDelay: `${index * 0.14}s`,
+                          }}
+                        />
+                        <button
+                          className={`attack-dot ${attack.severity || 'info'}`}
+                          style={{ top: `${top}%`, left: `${left}%`, animationDelay: `${index * 0.12}s` }}
+                          title={`${attack.source_ip} ${attack.intel?.country || ''}`}
+                          onClick={() => inspectIp(attack.source_ip)}
+                        />
+                      </React.Fragment>
                     );
                   })}
-                  <div className="home-node">
+                  <div className={attacks.length ? 'home-node under-attack' : 'home-node'}>
                     <Shield size={18} />
                     <span>PC-HERNAN</span>
                   </div>
