@@ -119,6 +119,8 @@ function localIps(){
 }
 
 function isPrivateIp(ip){
+  const raw = String(ip || '').toLowerCase();
+  if(raw === '::1' || raw.startsWith('fe80:') || raw.startsWith('fc') || raw.startsWith('fd')) return true;
   const parts = String(ip || '').split('.').map(Number);
   if(parts.length !== 4 || parts.some((part)=>Number.isNaN(part))) return false;
   const [a,b] = parts;

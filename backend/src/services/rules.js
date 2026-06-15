@@ -57,11 +57,11 @@ export function normalize(raw){
     username: cleanValue(raw.user || raw.username || raw.AccountName || raw.SubjectUserName || raw.User || extractedUser || 'unknown'),
     process: processPath,
     commandLine,
-    sourceIp,
-    sourcePort,
-    destinationIp,
-    destinationPort,
-    protocol,
+    sourceIp: sourceIp || cleanIp(extractLooseField(rawMessage, 'origen')),
+    sourcePort: sourcePort || cleanPort(extractLooseField(rawMessage, 'puerto_origen')),
+    destinationIp: destinationIp || cleanIp(extractLooseField(rawMessage, 'destino')),
+    destinationPort: destinationPort || cleanPort(extractLooseField(rawMessage, 'puerto_destino')),
+    protocol: protocol || cleanValue(extractLooseField(rawMessage, 'protocolo')).toUpperCase(),
     filePath: raw.filePath || raw.TargetFilename || raw.Image || raw.NewProcessName || extract(text, /([a-z]:\\\\[^"']+\.(exe|dll|ps1|vbs|js|bat|cmd))/),
     logonType: extractFromMessage(rawMessage, /Tipo de inicio de sesi[oó]n:\s*([0-9]+)/i) || extractFromMessage(rawMessage, /Logon Type:\s*([0-9]+)/i),
     isBenignServiceLogon: eventId === 4624 && messageText.includes('tipo de inicio de sesi') && messageText.includes('services.exe') && messageText.includes('system'),
@@ -79,6 +79,27 @@ function extract(text, re){
 function extractFromMessage(message, re){
   const match = String(message || '').match(re);
   return match ? cleanValue(match[1]) : '';
+}
+
+function extractLooseField(message, field){
+  const lines = String(message || '').split(/\r?\n/);
+  const wanted = {
+    origen: ['direccion de origen', 'direcci.n de origen', 'source address'],
+    destino: ['direccion de destino', 'direcci.n de destino', 'destination address'],
+    puerto_origen: ['puerto de origen', 'source port'],
+    puerto_destino: ['puerto de destino', 'destination port'],
+    protocolo: ['protocolo', 'protocol']
+  }[field] || [];
+  for(const line of lines){
+    const normalized = line.toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/�/g, '.');
+    if(!wanted.some((label)=>new RegExp(label).test(normalized))) continue;
+    const value = line.split(':').slice(1).join(':').trim();
+    if(value) return cleanValue(value);
+  }
+  return '';
 }
 
 function cleanValue(value){

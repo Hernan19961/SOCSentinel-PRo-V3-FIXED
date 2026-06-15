@@ -36,6 +36,7 @@ export async function runCorrelation(io){
       count(*)::int AS attempts,
       count(DISTINCT destination_port)::int AS ports,
       array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port IS NOT NULL) AS port_list,
+      bool_or(destination_port IN (22,23,80,135,139,445,3389,5985,5986)) AS touched_sensitive_port,
       max(created_at) AS last_seen
     FROM events
     WHERE source_ip IS NOT NULL
@@ -54,6 +55,7 @@ export async function runCorrelation(io){
     GROUP BY source_ip, hostname
     HAVING (count(*) >= 8 AND count(DISTINCT destination_port) >= 3)
         OR (count(*) >= 25 AND count(DISTINCT destination_port) >= 2)
+        OR (count(*) >= 6 AND bool_or(destination_port IN (22,23,80,135,139,445,3389,5985,5986)))
         OR count(DISTINCT destination_port) >= 5
   `, [localAddresses, blockedIps]);
 
@@ -69,6 +71,7 @@ export async function runCorrelation(io){
       attempts: row.attempts,
       ports: row.ports,
       port_list: row.port_list,
+      touched_sensitive_port: row.touched_sensitive_port,
       window: '5 minutes',
       last_seen: row.last_seen
     };
