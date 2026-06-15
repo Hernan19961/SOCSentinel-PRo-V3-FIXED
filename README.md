@@ -183,7 +183,7 @@ Sysmon64.exe -accepteula -i sysmonconfig.xml
 Esta V3 es una base real para laboratorio doméstico y entrenamiento SOC Nivel 1.
 
 
-## Guía rápida corregida para Hernan
+## Guía rápida corregida 
 
 ### Orden correcto de ejecución
 
