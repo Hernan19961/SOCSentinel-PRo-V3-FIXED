@@ -11,6 +11,25 @@ export const rules = [
   {name:'Creacion de archivo Sysmon', eventIds:[11], field:'rawText', terms:['.exe','.dll','.ps1','.vbs','.js'], severity:'medium', mitre:'T1105', recommendation:'Revisar origen del archivo, hash, firma y usuario que lo creo.'}
 ];
 
+const benignWindowsProcesses = [
+  'c:\\windows\\explorer.exe',
+  'c:\\windows\\system32\\explorer.exe'
+];
+
+const suspiciousCommandTerms = [
+  '-enc',
+  'encodedcommand',
+  'downloadstring',
+  'invoke-webrequest',
+  'iex ',
+  'rundll32',
+  'regsvr32',
+  'mshta',
+  'certutil',
+  'bitsadmin',
+  'powershell'
+];
+
 export function normalize(raw){
   const rawMessage = raw.rawMessage || raw.Message || '';
   const text = JSON.stringify(raw).toLowerCase();
@@ -29,13 +48,15 @@ export function normalize(raw){
   const sourcePort = cleanPort(raw.sourcePort || raw.SourcePort || raw.srcPort || extractFromMessage(rawMessage, /Source Port:\s*([0-9]+)/i));
   const destinationPort = cleanPort(raw.destinationPort || raw.DestinationPort || raw.destPort || raw.dstPort || extractFromMessage(rawMessage, /Destination Port:\s*([0-9]+)/i));
   const protocol = cleanValue(raw.protocol || raw.Protocol || extractFromMessage(rawMessage, /Protocol:\s*([^\r\n]+)/i)).toUpperCase();
+  const processPath = suppliedProcess || cleanValue(extractedProcess);
+  const commandLine = raw.commandLine || raw.CommandLine || raw.ProcessCommandLine || rawMessage || '';
   return {
     eventId,
     provider: raw.provider || raw.ProviderName || raw.Provider || 'unknown',
     hostname: raw.hostname || raw.MachineName || raw.Computer || raw.computer || process.env.COMPUTERNAME || 'unknown',
     username: cleanValue(raw.user || raw.username || raw.AccountName || raw.SubjectUserName || raw.User || extractedUser || 'unknown'),
-    process: suppliedProcess || cleanValue(extractedProcess),
-    commandLine: raw.commandLine || raw.CommandLine || raw.ProcessCommandLine || rawMessage || '',
+    process: processPath,
+    commandLine,
     sourceIp,
     sourcePort,
     destinationIp,
@@ -44,6 +65,7 @@ export function normalize(raw){
     filePath: raw.filePath || raw.TargetFilename || raw.Image || raw.NewProcessName || extract(text, /([a-z]:\\\\[^"']+\.(exe|dll|ps1|vbs|js|bat|cmd))/),
     logonType: extractFromMessage(rawMessage, /Tipo de inicio de sesi[oó]n:\s*([0-9]+)/i) || extractFromMessage(rawMessage, /Logon Type:\s*([0-9]+)/i),
     isBenignServiceLogon: eventId === 4624 && messageText.includes('tipo de inicio de sesi') && messageText.includes('services.exe') && messageText.includes('system'),
+    isBenignExplorer: isBenignExplorer(processPath, commandLine, text),
     rawText: text,
     raw
   };
@@ -83,11 +105,26 @@ function cleanProcess(value){
   return cleaned;
 }
 
+function normalizePath(value){
+  return String(value || '').replace(/\//g,'\\').toLowerCase();
+}
+
+function isBenignExplorer(processPath, commandLine, rawText){
+  const normalizedProcess = normalizePath(processPath);
+  if(!benignWindowsProcesses.includes(normalizedProcess)) return false;
+  const lowerCommand = String(commandLine || '').toLowerCase();
+  const lowerRaw = String(rawText || '').toLowerCase();
+  const hasSuspiciousCommand = suspiciousCommandTerms.some((term)=>lowerCommand.includes(term) || lowerRaw.includes(term));
+  const hasTempOrUserDropPath = /\\appdata\\local\\temp\\|\\windows\\temp\\|\\users\\public\\|\\programdata\\.*\.(exe|dll|ps1|vbs|js|bat|cmd)/i.test(commandLine) || /\\appdata\\local\\temp\\|\\windows\\temp\\|\\users\\public\\|\\programdata\\.*\.(exe|dll|ps1|vbs|js|bat|cmd)/i.test(rawText);
+  return !hasSuspiciousCommand && !hasTempOrUserDropPath;
+}
+
 export function analyzeEvent(event){
   const alerts=[];
   for(const rule of rules){
     if(!rule.eventIds.includes(event.eventId)) continue;
     if(event.isBenignServiceLogon) continue;
+    if(event.isBenignExplorer && ['high','critical'].includes(rule.severity)) continue;
     const value = String(event[rule.field] ?? event.rawText ?? '').toLowerCase();
     const terms = rule.terms.length ? rule.terms : [''];
     for(const term of terms){

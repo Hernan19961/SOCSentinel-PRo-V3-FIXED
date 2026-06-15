@@ -583,6 +583,7 @@ async function raiseDefenderAlerts(status){
   const detections = Array.isArray(status?.detections) ? status.detections : [];
   const active = detections.filter((item)=>item.actionSuccess === false || ![3,4,5].includes(Number(item.threatStatusId)));
   for(const item of active.slice(0, 10)){
+    if(isBenignDefenderExplorerDetection(item)) continue;
     const resource = Array.isArray(item.resources) ? item.resources[0] : '';
     const alert = {
       title: 'Microsoft Defender detecto amenaza',
@@ -611,6 +612,21 @@ async function raiseDefenderAlerts(status){
     io.emit('event:new', ev.rows[0]);
     io.emit('alert:new', al.rows[0]);
   }
+}
+
+function isBenignDefenderExplorerDetection(item){
+  const processName = String(item?.processName || '').replace(/\//g,'\\').toLowerCase();
+  if(!['c:\\windows\\explorer.exe','explorer.exe'].includes(processName)) return false;
+  const resources = Array.isArray(item?.resources) ? item.resources.map((value)=>String(value || '').replace(/\//g,'\\').toLowerCase()).filter(Boolean) : [];
+  const hasRiskyResource = resources.some((resource)=>(
+    resource.includes('\\appdata\\local\\temp\\') ||
+    resource.includes('\\windows\\temp\\') ||
+    resource.includes('\\users\\public\\') ||
+    resource.includes('\\programdata\\') ||
+    /\.(exe|dll|ps1|vbs|js|bat|cmd|scr|lnk)$/i.test(resource)
+  ));
+  const threatName = String(item?.threatName || '').trim();
+  return !hasRiskyResource && (!threatName || /^unknown$/i.test(threatName));
 }
 
 app.get('/api/defender/status', async (_,res)=>{
