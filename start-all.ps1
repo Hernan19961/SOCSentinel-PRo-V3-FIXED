@@ -28,6 +28,39 @@ function Ensure-Env {
   }
 }
 
+function Set-EnvValue {
+  param(
+    [string]$EnvFile,
+    [string]$Key,
+    [string]$Value
+  )
+  $content = @()
+  if (Test-Path $EnvFile) {
+    $content = Get-Content $EnvFile
+  }
+  $updated = $false
+  $next = foreach ($line in $content) {
+    if ($line -match "^$([regex]::Escape($Key))=") {
+      $updated = $true
+      "$Key=$Value"
+    } else {
+      $line
+    }
+  }
+  if (!$updated) {
+    $next += "$Key=$Value"
+  }
+  Set-Content -Path $EnvFile -Value $next
+}
+
+function Normalize-AgentEnv {
+  $envFile = Join-Path $AgentDir ".env"
+  Ensure-Env $AgentDir
+  Set-EnvValue -EnvFile $envFile -Key "SOCSENTINEL_API" -Value "http://127.0.0.1:4000/api/events"
+  Set-EnvValue -EnvFile $envFile -Key "POLL_SECONDS" -Value "5"
+  Set-EnvValue -EnvFile $envFile -Key "BATCH_SIZE" -Value "10"
+}
+
 function Start-SOCWindow {
   param(
     [string]$Title,
@@ -99,7 +132,7 @@ Write-Host "Raiz: $Root" -ForegroundColor DarkGray
 Write-Host ""
 
 Ensure-Env $BackendDir
-Ensure-Env $AgentDir
+Normalize-AgentEnv
 
 if (!(Test-Path (Join-Path $BackendDir "node_modules"))) {
   Write-Host "Instalando dependencias backend..." -ForegroundColor Yellow
@@ -129,13 +162,11 @@ $realResponse = $envContent -match "^ALLOW_RESPONSE_ACTIONS=true"
 if (Test-Port 4000) {
   if ($realResponse) {
     Write-Host "Backend ya esta escuchando en http://localhost:4000" -ForegroundColor Yellow
-    $restart = Read-Host "Respuesta real requiere backend como Administrador. Reiniciar backend elevado? (S/N)"
-    if ($restart -match "^[sS]") {
-      $pid = Get-PortPid 4000
-      if ($pid) { Stop-Process -Id $pid -Force }
-      Start-Sleep -Seconds 2
-      Start-SOCWindow -Title "SOCSentinel Backend API ADMIN" -WorkingDirectory $BackendDir -Command "npm run dev" -RunAsAdmin
-    }
+    Write-Host "Respuesta real requiere backend como Administrador. Reiniciando backend elevado..." -ForegroundColor Yellow
+    $pid = Get-PortPid 4000
+    if ($pid) { Stop-Process -Id $pid -Force }
+    Start-Sleep -Seconds 2
+    Start-SOCWindow -Title "SOCSentinel Backend API ADMIN" -WorkingDirectory $BackendDir -Command "npm run dev" -RunAsAdmin
   } else {
     Write-Host "Backend ya esta escuchando en http://localhost:4000" -ForegroundColor Green
   }
@@ -161,14 +192,10 @@ Write-Host "Backend:  http://localhost:4000" -ForegroundColor Green
 Write-Host "Consola:  http://127.0.0.1:5173" -ForegroundColor Green
 Write-Host ""
 
-$agentAnswer = Read-Host "Quieres iniciar el agente Windows ahora como Administrador? (S/N)"
-if ($agentAnswer -match "^[sS]") {
-  $agentCommand = "cd '$AgentDir'; npm start"
-  Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $agentCommand
-  Write-Host "Se solicito una ventana elevada para el agente." -ForegroundColor Yellow
-} else {
-  Write-Host "Agente omitido. Puedes iniciarlo luego con start-agent-admin.ps1 o desde este launcher." -ForegroundColor Yellow
-}
+Write-Host "Iniciando agente Windows como Administrador..." -ForegroundColor Yellow
+$agentCommand = "cd '$AgentDir'; npm start"
+Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $agentCommand
+Write-Host "Se solicito una ventana elevada para el agente." -ForegroundColor Yellow
 
 Start-Sleep -Seconds 3
 Start-Process "http://127.0.0.1:5173"
