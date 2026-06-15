@@ -516,12 +516,21 @@ app.get('/api/blocked-ips', async (_,res)=>{
   res.json(r.rows);
 });
 app.get('/api/network', async (_,res)=>{
-  const localAddresses = localIps();
+  const localAddresses = trustedLocalIps();
   const blocked = await pool.query("SELECT ip FROM blocked_ips WHERE status='blocked'");
   const blockedIpList = blocked.rows.map((row)=>row.ip);
   const [events, sources, ports] = await Promise.all([
     pool.query(`SELECT * FROM events WHERE source_ip IS NOT NULL AND source_ip <> '' ORDER BY created_at DESC LIMIT 200`),
-    pool.query(`SELECT source_ip, count(*)::int AS attempts, count(DISTINCT destination_port)::int AS ports, max(created_at) AS last_seen
+    pool.query(`SELECT
+                  source_ip,
+                  count(*)::int AS attempts,
+                  count(DISTINCT destination_port)::int AS ports,
+                  bool_or(destination_port = ANY($3::int[])) AS touched_sensitive_port,
+                  max(created_at) AS last_seen,
+                  ((count(*) >= 8 AND count(DISTINCT destination_port) >= 3)
+                    OR (count(*) >= 25 AND count(DISTINCT destination_port) >= 2)
+                    OR count(DISTINCT destination_port) >= 5
+                    OR (count(*) >= 4 AND bool_or(destination_port = ANY($3::int[])))) AS is_attack
                 FROM events
                 WHERE source_ip IS NOT NULL
                   AND source_ip <> ''
@@ -538,7 +547,7 @@ app.get('/api/network', async (_,res)=>{
                   AND created_at > now() - interval '24 hours'
                 GROUP BY source_ip
                 ORDER BY attempts DESC
-                LIMIT 30`, [localAddresses, blockedIpList]),
+                LIMIT 30`, [localAddresses, blockedIpList, sensitiveScanPorts]),
     pool.query(`SELECT destination_port, count(*)::int AS hits
                 FROM events
                 WHERE destination_port IS NOT NULL
@@ -551,7 +560,7 @@ app.get('/api/network', async (_,res)=>{
   res.json({events:events.rows, sources:sources.rows, ports:ports.rows});
 });
 app.get('/api/attacks', async (_,res)=>{
-  const localAddresses = localIps();
+  const localAddresses = trustedLocalIps();
   const r = await pool.query(
     `SELECT
        source_ip,
@@ -585,6 +594,7 @@ app.get('/api/attacks', async (_,res)=>{
       || row.ports >= 5
       || (row.attempts >= 4 && row.touched_sensitive_port);
     const severity = alertSeverity.rows[0]?.severity || (inferredAttack ? 'high' : 'info');
+    if(severity === 'info' && !inferredAttack) continue;
     const lastSeenMs = new Date(row.last_seen).getTime();
     const alertMs = alertSeverity.rows[0]?.created_at ? new Date(alertSeverity.rows[0].created_at).getTime() : 0;
     const recentWindowMs = 10 * 60 * 1000;

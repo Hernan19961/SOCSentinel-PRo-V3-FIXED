@@ -744,9 +744,12 @@ function App() {
                   {networkData.sources.map((source) => (
                     <article className="network-item" key={source.source_ip}>
                       <strong>{source.source_ip}</strong>
+                      <span className={source.is_attack ? 'severity high' : 'severity info'}>{source.is_attack ? 'IDS scan' : 'observado'}</span>
                       <span>{source.attempts} intentos / {source.ports} puertos</span>
                       <small>{formatTime(source.last_seen)}</small>
-                      <ActionButton icon={Ban} label="Bloquear IP" onClick={() => action('block_ip', source.source_ip, null)} />
+                      {source.is_attack && (
+                        <ActionButton icon={Ban} label="Bloquear IP" onClick={() => action('block_ip', source.source_ip, null)} />
+                      )}
                     </article>
                   ))}
                 </div>
