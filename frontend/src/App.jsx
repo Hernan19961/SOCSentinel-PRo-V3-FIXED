@@ -475,6 +475,18 @@ function App() {
     }
   }
 
+  async function clearHandledDefender() {
+    if (!confirm('Esto limpia de la vista SOCSentinel las detecciones Defender ya manejadas. Las amenazas activas seguiran visibles y no se toca la cuarentena real.')) return;
+    const result = await fetch(`${API}/api/defender/clear-handled`, { method: 'POST' }).then((response) => response.json());
+    if (result.ok) {
+      setDefender(result.defender);
+      pushConsole(`defender limpio: ${result.hidden} detecciones manejadas ocultadas`);
+      load();
+    } else {
+      alert(result.error || 'No se pudo limpiar Defender');
+    }
+  }
+
   const totals = {
     events: events.length,
     alerts: alerts.length,
@@ -915,6 +927,7 @@ function App() {
               </div>
               <div className="buttons">
                 <ActionButton icon={RefreshCw} label="Actualizar Defender" onClick={refreshDefender} />
+                <ActionButton icon={Trash2} label="Limpiar manejadas" onClick={clearHandledDefender} />
                 <ActionButton icon={ScanLine} label="QuickScan" onClick={() => action('defender_scan', 'QuickScan', null)} />
                 <ActionButton icon={ScanLine} label="FullScan" onClick={() => action('defender_scan', 'FullScan', null)} />
               </div>
@@ -933,7 +946,7 @@ function App() {
                 <article className={defender?.summary?.activeThreats > 0 ? 'defender-card danger' : 'defender-card ok'}>
                   <span>Amenazas activas</span>
                   <strong>{defender?.summary?.activeThreats ?? '-'}</strong>
-                  <small>{defender?.summary?.totalDetections ?? 0} detecciones recientes</small>
+                  <small>{defender?.summary?.totalDetections ?? 0} visibles / {defender?.summary?.hiddenHandledDetections ?? 0} ocultas</small>
                 </article>
                 <article className="defender-card">
                   <span>Firmas AV</span>

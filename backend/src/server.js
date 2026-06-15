@@ -19,8 +19,15 @@ const server = http.createServer(app);
 const io = new Server(server, { cors:{ origin:'*' }});
 app.use(cors()); app.use(express.json({limit:'10mb'}));
 app.get('/api/health', (_,res)=>res.json({ok:true, name:'SOCSentinel Pro V3', mode:'real-time-ready', responseActions: process.env.ALLOW_RESPONSE_ACTIONS === 'true'}));
+app.get('/api/local-assets', (_,res)=>res.json({
+  hostname: os.hostname(),
+  localIps: trustedLocalIps(),
+  interfaces: os.networkInterfaces()
+}));
 const seenFirewallLines = new Set();
 let lastFirewallError = '';
+const dataDir = path.join(projectRoot, 'backend', 'data');
+const defenderDismissedPath = path.join(dataDir, 'defender-dismissed.json');
 
 const riskyAttachmentExt = ['.exe','.scr','.bat','.cmd','.ps1','.vbs','.js','.jse','.wsf','.hta','.iso','.img','.lnk','.docm','.xlsm','.zip','.rar','.7z','.html','.htm'];
 const shortenerDomains = ['bit.ly','tinyurl.com','t.co','goo.gl','ow.ly','is.gd','buff.ly','cutt.ly','rebrand.ly','lnkd.in'];
@@ -118,13 +125,72 @@ function localIps(){
     .filter(Boolean);
 }
 
+function normalizeIpValue(ip){
+  return String(ip || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^::ffff:/, '')
+    .replace(/%.+$/, '');
+}
+
+function trustedLocalIps(){
+  return [...new Set(localIps().map(normalizeIpValue).filter(Boolean))];
+}
+
+function isOwnDeviceIp(ip){
+  const normalized = normalizeIpValue(ip);
+  if(!normalized) return false;
+  return normalized === '::1'
+    || normalized === '127.0.0.1'
+    || normalized.startsWith('fe80:')
+    || trustedLocalIps().includes(normalized);
+}
+
 function isPrivateIp(ip){
-  const raw = String(ip || '').toLowerCase();
+  const raw = normalizeIpValue(ip);
   if(raw === '::1' || raw.startsWith('fe80:') || raw.startsWith('fc') || raw.startsWith('fd')) return true;
-  const parts = String(ip || '').split('.').map(Number);
+  const parts = raw.split('.').map(Number);
   if(parts.length !== 4 || parts.some((part)=>Number.isNaN(part))) return false;
   const [a,b] = parts;
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 169 || a === 127;
+}
+
+function readJsonFile(filePath, fallback){
+  try {
+    if(!fs.existsSync(filePath)) return fallback;
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonFile(filePath, value){
+  fs.mkdirSync(path.dirname(filePath), {recursive:true});
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function defenderDetectionKey(item){
+  const resources = Array.isArray(item?.resources) ? item.resources.join('|') : '';
+  return `${item?.threatId || 'unknown'}:${stableHash(`${item?.processName || ''}:${resources}`)}`;
+}
+
+function filterDismissedDefenderDetections(status){
+  if(!status?.ok || !Array.isArray(status.detections)) return status;
+  const dismissed = readJsonFile(defenderDismissedPath, {keys:[]});
+  const keys = new Set(Array.isArray(dismissed.keys) ? dismissed.keys : []);
+  const originalCount = status.detections.length;
+  const detections = status.detections.filter((item)=>item.actionSuccess === false || !keys.has(defenderDetectionKey(item)));
+  const activeThreats = detections.filter((item)=>item.actionSuccess === false).length;
+  return {
+    ...status,
+    detections,
+    summary: {
+      ...status.summary,
+      activeThreats,
+      totalDetections: detections.length,
+      hiddenHandledDetections: Math.max(0, originalCount - detections.length)
+    }
+  };
 }
 
 function stableHash(value){
@@ -361,7 +427,7 @@ const noisyScanPorts = [137,138,1900,5353];
 async function detectImmediatePortScan(event){
   if(!event.sourceIp || !event.destinationPort) return null;
   if(noisyScanPorts.includes(Number(event.destinationPort))) return null;
-  if(localIps().includes(event.sourceIp)) return null;
+  if(isOwnDeviceIp(event.sourceIp)) return null;
   const blocked = await pool.query("SELECT ip FROM blocked_ips WHERE status='blocked' AND ip=$1", [event.sourceIp]);
   if(blocked.rowCount) return null;
   const duplicate = await pool.query(
@@ -427,6 +493,7 @@ async function ingestRawEvents(payload){
     }
     const alerts = analyzeEvent(e);
     for(const a of alerts){
+      if(isOwnDeviceIp(a.sourceIp)) continue;
       if(await hasRecentDuplicateAlert(a)) continue;
       const al = await pool.query(`INSERT INTO alerts(event_ref,title,severity,hostname,username,process,source_ip,file_path,matched_term,mitre,recommendation,evidence) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,[ev.rows[0].id,a.title,a.severity,a.hostname,a.username,a.process,a.sourceIp,a.filePath,a.matchedTerm,a.mitre,a.recommendation,a.evidence]);
       io.emit('alert:new', al.rows[0]);
@@ -787,9 +854,21 @@ function isBenignDefenderExplorerDetection(item){
 }
 
 app.get('/api/defender/status', async (_,res)=>{
+  const rawStatus = await runPowerShellJson('defender_status.ps1');
+  if(rawStatus.ok) await raiseDefenderAlerts(rawStatus).catch(()=>{});
+  res.json(filterDismissedDefenderDetections(rawStatus));
+});
+
+app.post('/api/defender/clear-handled', async (_,res)=>{
   const status = await runPowerShellJson('defender_status.ps1');
-  if(status.ok) await raiseDefenderAlerts(status).catch(()=>{});
-  res.json(status);
+  if(!status.ok) return res.status(500).json(status);
+  const handled = (Array.isArray(status.detections) ? status.detections : []).filter((item)=>item.actionSuccess === true);
+  const dismissed = readJsonFile(defenderDismissedPath, {keys:[]});
+  const keys = new Set(Array.isArray(dismissed.keys) ? dismissed.keys : []);
+  for(const item of handled) keys.add(defenderDetectionKey(item));
+  writeJsonFile(defenderDismissedPath, {keys:[...keys], updatedAt:new Date().toISOString()});
+  const filtered = filterDismissedDefenderDetections(status);
+  res.json({ok:true, hidden:handled.length, defender:filtered});
 });
 
 async function resolveExistingAlertId(alertId){

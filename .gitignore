@@ -19,6 +19,7 @@ build/
 # Runtime data and logs
 *.log
 pfirewall-debug.log
+backend/data/
 reports/
 *.tmp
 *.bak

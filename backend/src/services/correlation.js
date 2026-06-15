@@ -9,6 +9,22 @@ function localIps(){
     .filter(Boolean);
 }
 
+function normalizeIpValue(ip){
+  return String(ip || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^::ffff:/, '')
+    .replace(/%.+$/, '');
+}
+
+function ownDeviceIps(){
+  return [...new Set([
+    '127.0.0.1',
+    '::1',
+    ...localIps().map(normalizeIpValue).filter(Boolean)
+  ])];
+}
+
 export async function runCorrelation(io){
   const brute = await pool.query(`SELECT hostname, username, count(*)::int AS fails FROM events WHERE event_id=4625 AND created_at > now() - interval '10 minutes' GROUP BY hostname, username HAVING count(*) >= 5`);
   for(const row of brute.rows){
@@ -26,7 +42,7 @@ export async function runCorrelation(io){
     }
   }
 
-  const localAddresses = localIps();
+  const localAddresses = ownDeviceIps();
   const blocked = await pool.query("SELECT ip FROM blocked_ips WHERE status='blocked'");
   const blockedIps = blocked.rows.map((row)=>row.ip);
   const scans = await pool.query(`
