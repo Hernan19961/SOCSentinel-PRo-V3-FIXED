@@ -178,6 +178,32 @@ function App() {
     setSession(null);
   }
 
+  function playSiren() {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return;
+      const ctx = new AudioContext();
+      const gain = ctx.createGain();
+      gain.gain.value = 0.035;
+      gain.connect(ctx.destination);
+      const now = ctx.currentTime;
+      [0, 0.28, 0.56].forEach((offset) => {
+        const osc = ctx.createOscillator();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(680, now + offset);
+        osc.frequency.linearRampToValueAtTime(1080, now + offset + 0.16);
+        osc.frequency.linearRampToValueAtTime(620, now + offset + 0.28);
+        osc.connect(gain);
+        osc.start(now + offset);
+        osc.stop(now + offset + 0.28);
+      });
+      setTimeout(() => ctx.close(), 1100);
+      navigator.vibrate?.([120, 70, 120]);
+    } catch {
+      // Audio can be blocked by the browser until the user interacts.
+    }
+  }
+
   async function load() {
     const [nextAlerts, nextEvents, nextActions, nextStats, nextHealth, nextNetwork, nextBlockedIps, nextEmailThreats, nextDefender, nextAttacks] = await Promise.all([
       getJson('/api/alerts', []),
@@ -211,6 +237,7 @@ function App() {
       pushConsole(`alerta ${alert.severity}: ${alert.title}`);
       loadAttackFeed();
       if (['critical', 'high'].includes(alert.severity)) {
+        playSiren();
         document.title = `ALERTA ${alert.severity.toUpperCase()} - SOCSentinel`;
       }
     });

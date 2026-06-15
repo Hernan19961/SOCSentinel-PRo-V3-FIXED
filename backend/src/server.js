@@ -355,6 +355,60 @@ function parseFirewallLine(line){
   };
 }
 
+const sensitiveScanPorts = [21,22,23,25,53,80,135,139,443,445,1433,3306,3389,5432,5900,5985,5986,8080,8443];
+const noisyScanPorts = [137,138,1900,5353];
+
+async function detectImmediatePortScan(event){
+  if(!event.sourceIp || !event.destinationPort) return null;
+  if(noisyScanPorts.includes(Number(event.destinationPort))) return null;
+  if(localIps().includes(event.sourceIp)) return null;
+  const blocked = await pool.query("SELECT ip FROM blocked_ips WHERE status='blocked' AND ip=$1", [event.sourceIp]);
+  if(blocked.rowCount) return null;
+  const duplicate = await pool.query(
+    `SELECT id FROM alerts WHERE title='Posible escaneo de puertos' AND source_ip=$1 AND created_at > now() - interval '5 minutes' LIMIT 1`,
+    [event.sourceIp]
+  );
+  if(duplicate.rowCount) return null;
+  const r = await pool.query(
+    `SELECT
+       count(*)::int AS attempts,
+       count(DISTINCT destination_port)::int AS ports,
+       array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port IS NOT NULL) AS port_list,
+       bool_or(destination_port = ANY($2::int[])) AS touched_sensitive_port,
+       max(created_at) AS last_seen
+     FROM events
+     WHERE source_ip=$1
+       AND destination_port IS NOT NULL
+       AND destination_port <> ALL($3::int[])
+       AND created_at > now() - interval '5 minutes'`,
+    [event.sourceIp, sensitiveScanPorts, noisyScanPorts]
+  );
+  const row = r.rows[0];
+  if(!row) return null;
+  const shouldAlert = (row.attempts >= 8 && row.ports >= 3)
+    || (row.attempts >= 25 && row.ports >= 2)
+    || row.ports >= 5
+    || (row.attempts >= 4 && row.touched_sensitive_port);
+  if(!shouldAlert) return null;
+  const evidence = {
+    source_ip: event.sourceIp,
+    hostname: event.hostname,
+    attempts: row.attempts,
+    ports: row.ports,
+    port_list: row.port_list,
+    touched_sensitive_port: row.touched_sensitive_port,
+    window: '5 minutes',
+    last_seen: row.last_seen
+  };
+  const alert = await pool.query(
+    `INSERT INTO alerts(title,severity,status,hostname,source_ip,matched_term,mitre,recommendation,evidence)
+     VALUES('Posible escaneo de puertos','high','new',$1,$2,$3,'T1046','Reconocimiento de red detectado en tiempo real. Revisar puertos tocados y bloquear IP si no es autorizada.',$4)
+     RETURNING *`,
+    [event.hostname, event.sourceIp, `${row.attempts} conexiones / ${row.ports} puertos`, JSON.stringify(evidence)]
+  );
+  return alert.rows[0];
+}
+
 async function ingestRawEvents(payload){
   const items = Array.isArray(payload) ? payload : [payload];
   const created=[];
@@ -366,6 +420,11 @@ async function ingestRawEvents(payload){
       [e.eventId,e.provider,e.hostname,e.username,e.process,e.commandLine,e.sourceIp,e.sourcePort,e.destinationIp,e.destinationPort,e.protocol,e.filePath,e.raw]
     );
     io.emit('event:new', ev.rows[0]);
+    const scanAlert = await detectImmediatePortScan(e).catch(()=>null);
+    if(scanAlert){
+      io.emit('alert:new', scanAlert);
+      created.push(scanAlert);
+    }
     const alerts = analyzeEvent(e);
     for(const a of alerts){
       if(await hasRecentDuplicateAlert(a)) continue;
@@ -433,6 +492,7 @@ app.get('/api/attacks', async (_,res)=>{
        count(*)::int AS attempts,
        count(DISTINCT destination_port)::int AS ports,
        array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port IS NOT NULL) AS port_list,
+       bool_or(destination_port = ANY($2::int[])) AS touched_sensitive_port,
        max(created_at) AS last_seen,
        min(created_at) AS first_seen
      FROM events
@@ -443,7 +503,7 @@ app.get('/api/attacks', async (_,res)=>{
      GROUP BY source_ip
      ORDER BY last_seen DESC
      LIMIT 80`,
-    [localAddresses]
+    [localAddresses, sensitiveScanPorts]
   );
   const items = [];
   for(const row of r.rows){
@@ -453,7 +513,11 @@ app.get('/api/attacks', async (_,res)=>{
        ORDER BY CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, created_at DESC LIMIT 1`,
       [row.source_ip]
     );
-    const severity = alertSeverity.rows[0]?.severity || (row.ports >= 5 ? 'high' : 'info');
+    const inferredAttack = (row.attempts >= 8 && row.ports >= 3)
+      || (row.attempts >= 25 && row.ports >= 2)
+      || row.ports >= 5
+      || (row.attempts >= 4 && row.touched_sensitive_port);
+    const severity = alertSeverity.rows[0]?.severity || (inferredAttack ? 'high' : 'info');
     const lastSeenMs = new Date(row.last_seen).getTime();
     const alertMs = alertSeverity.rows[0]?.created_at ? new Date(alertSeverity.rows[0].created_at).getTime() : 0;
     const recentWindowMs = 10 * 60 * 1000;
