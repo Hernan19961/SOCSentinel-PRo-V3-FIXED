@@ -118,7 +118,10 @@ function analyzeEmailThreat(rawEmail){
 
   const finalScore = Math.max(0, Math.min(score,100));
   const severity = finalScore >= 70 ? 'critical' : finalScore >= 40 ? 'high' : finalScore >= 20 ? 'medium' : 'low';
-  return {sender, senderDomain, replyTo, returnPath, returnPathDomain, recipient, subject, authResults, score:finalScore, severity, indicators:[...new Set(indicators)], urls, attachments};
+  const verdict = finalScore >= 70 ? 'phishing_probable' : finalScore >= 40 ? 'sospechoso' : finalScore >= 20 ? 'revisar' : 'probablemente_legitimo';
+  const authVerdict = /spf=pass/i.test(authResults) && /dkim=pass/i.test(authResults) && /dmarc=pass/i.test(authResults) ? 'autenticacion fuerte' : /spf=(fail|softfail)|dkim=fail|dmarc=fail/i.test(authResults) ? 'autenticacion fallida' : 'autenticacion insuficiente';
+  const recommendedAction = finalScore >= 70 ? 'Cuarentena/bloquear remitente y revisar URLs/adjuntos.' : finalScore >= 40 ? 'Revisar cabeceras, URLs y adjuntos antes de interactuar.' : 'Registrar como evidencia y monitorear.';
+  return {sender, senderDomain, replyTo, returnPath, returnPathDomain, recipient, subject, authResults, score:finalScore, severity, verdict, authVerdict, recommendedAction, indicators:[...new Set(indicators)], urls, attachments};
 }
 
 function localIps(){
@@ -855,7 +858,22 @@ app.get('/api/hunt', async (req,res)=>{
   const r=await pool.query(`SELECT * FROM events ${where} ORDER BY created_at DESC LIMIT 200`, values);
   res.json(r.rows);
 });
-app.patch('/api/alerts/:id', async (req,res)=>{ const {status}=req.body; const r=await pool.query('UPDATE alerts SET status=$1 WHERE id=$2 RETURNING *',[status,req.params.id]); io.emit('alert:update', r.rows[0]); res.json(r.rows[0]); });
+app.patch('/api/alerts/:id', async (req,res)=>{
+  const allowedClassifications = ['unclassified','true_positive','false_positive','benign_true_positive','needs_review'];
+  const current = await pool.query('SELECT * FROM alerts WHERE id=$1', [req.params.id]);
+  if(!current.rowCount) return res.status(404).json({error:'alerta no encontrada'});
+  const nextStatus = req.body.status ?? current.rows[0].status ?? 'new';
+  const nextClassification = req.body.classification ?? current.rows[0].classification ?? 'unclassified';
+  if(!allowedClassifications.includes(nextClassification)) return res.status(400).json({error:'clasificacion invalida'});
+  const nextNotes = req.body.analyst_notes ?? current.rows[0].analyst_notes ?? null;
+  const classifiedAt = req.body.classification ? new Date() : current.rows[0].classified_at;
+  const r=await pool.query(
+    'UPDATE alerts SET status=$1, classification=$2, analyst_notes=$3, classified_at=$4 WHERE id=$5 RETURNING *',
+    [nextStatus,nextClassification,nextNotes,classifiedAt,req.params.id]
+  );
+  io.emit('alert:update', r.rows[0]);
+  res.json(r.rows[0]);
+});
 app.delete('/api/alerts/:id', async (req,res)=>{ await pool.query('DELETE FROM alerts WHERE id=$1',[req.params.id]); io.emit('alert:delete',{id:req.params.id}); res.json({ok:true, note:'Eliminada del SIEM, no del equipo.'}); });
 app.delete('/api/maintenance/noisy-alerts', async (_,res)=>{
   const deleted = await pool.query(`DELETE FROM alerts WHERE title='Login exitoso' OR (event_ref IN (SELECT id FROM events WHERE event_id=4624) AND severity='info') RETURNING id`);

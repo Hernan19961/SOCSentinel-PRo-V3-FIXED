@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS alerts (
   title TEXT NOT NULL,
   severity TEXT NOT NULL,
   status TEXT DEFAULT 'new',
+  classification TEXT DEFAULT 'unclassified',
+  analyst_notes TEXT,
+  classified_at TIMESTAMPTZ,
   hostname TEXT,
   username TEXT,
   process TEXT,
@@ -141,3 +144,8 @@ CREATE TABLE IF NOT EXISTS quarantine_items (
   action_id UUID REFERENCES actions(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT now()
 );
+
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS classification TEXT DEFAULT 'unclassified';
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS analyst_notes TEXT;
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS classified_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_alerts_classification ON alerts(classification);

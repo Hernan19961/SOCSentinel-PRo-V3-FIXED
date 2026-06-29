@@ -1010,3 +1010,44 @@ pre {
     flex-direction: column;
   }
 }
+
+.triage-panel,
+.phishing-verdict {
+  background: #09101c;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 12px;
+  padding: 10px;
+}
+
+.triage-panel button {
+  background: rgba(56, 242, 160, 0.08);
+  border: 1px solid rgba(56, 242, 160, 0.26);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 8px 10px;
+}
+
+.triage-pill {
+  align-items: center;
+  background: rgba(83, 168, 255, 0.12);
+  border: 1px solid rgba(83, 168, 255, 0.36);
+  border-radius: 999px;
+  color: #cfe7ff;
+  display: inline-flex;
+  font-size: 12px;
+  padding: 7px 10px;
+}
+
+.phishing-verdict {
+  display: grid;
+}
+
+.phishing-verdict span,
+.phishing-verdict small {
+  color: var(--muted);
+}

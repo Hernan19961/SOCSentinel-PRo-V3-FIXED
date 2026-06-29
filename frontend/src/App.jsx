@@ -45,6 +45,13 @@ const modules = [
 ];
 
 const severityRank = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+const classificationLabels = {
+  unclassified: 'Sin clasificar',
+  needs_review: 'En revision',
+  true_positive: 'True positive',
+  false_positive: 'False positive',
+  benign_true_positive: 'Benigno real',
+};
 
 function clsSeverity(severity) {
   return `severity ${severity || 'info'}`;
@@ -397,6 +404,20 @@ function App() {
     load();
   }
 
+
+  async function classifyAlert(alert, classification, status = 'closed') {
+    const analyst_notes = prompt('Nota del analista SOC para esta clasificacion:', alert.analyst_notes || '');
+    if (analyst_notes === null) return;
+    const result = await fetch(`${API}/api/alerts/${alert.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ classification, status, analyst_notes }),
+    }).then((response) => response.json());
+    pushConsole(`alerta ${alert.id.slice(0, 8)} clasificada como ${classificationLabels[classification] || classification}`);
+    setDetails((current) => current?.data?.id === alert.id ? { ...current, data: result } : current);
+    load();
+  }
+
   async function removeAlert(id) {
     if (!confirm('Esto borra la alerta del SIEM, no elimina malware ni evidencia del equipo.')) return;
     await fetch(`${API}/api/alerts/${id}`, { method: 'DELETE' });
@@ -671,6 +692,7 @@ function App() {
                         <div><dt>Score</dt><dd>{alert.email_score ?? alert.evidence?.score ?? '-'}</dd></div>
                         <div><dt>MITRE</dt><dd>{alert.mitre || '-'}</dd></div>
                         <div><dt>Estado</dt><dd>{alert.status || 'new'}</dd></div>
+                        <div><dt>Clasificacion</dt><dd>{classificationLabels[alert.classification] || alert.classification || 'Sin clasificar'}</dd></div>
                       </>
                     ) : (
                       <>
@@ -680,11 +702,15 @@ function App() {
                         <div><dt>IP</dt><dd>{alert.source_ip || '-'}</dd></div>
                         <div><dt>MITRE</dt><dd>{alert.mitre || '-'}</dd></div>
                         <div><dt>Estado</dt><dd>{alert.status || 'new'}</dd></div>
+                        <div><dt>Clasificacion</dt><dd>{classificationLabels[alert.classification] || alert.classification || 'Sin clasificar'}</dd></div>
                       </>
                     )}
                   </dl>
                   <div className="buttons">
-                    <ActionButton icon={Eye} label="En investigacion" onClick={() => updateAlert(alert.id, 'investigating')} />
+                    <ActionButton icon={Eye} label="En investigacion" onClick={() => classifyAlert(alert, 'needs_review', 'investigating')} />
+                    <ActionButton icon={ShieldCheck} label="True positive" onClick={() => classifyAlert(alert, 'true_positive', 'confirmed')} />
+                    <ActionButton icon={Shield} label="False positive" onClick={() => classifyAlert(alert, 'false_positive', 'closed')} />
+                    <ActionButton icon={Eye} label="Benigno real" onClick={() => classifyAlert(alert, 'benign_true_positive', 'closed')} />
                     <ActionButton icon={MapPin} label="Rastrear" onClick={() => inspectAlert(alert)} />
                     <ActionButton icon={Ban} label="Bloquear IP" onClick={() => action('block_ip', alert.source_ip, alert.id)} disabled={!alert.source_ip || isEmailAlert(alert)} />
                     <ActionButton icon={Ban} label="Bloquear puerto" onClick={() => action('block_port', alertPort(alert), alert.id)} disabled={!alertPort(alert) || isEmailAlert(alert)} />
@@ -913,7 +939,7 @@ function App() {
                   <button className="email-item" key={item.id} onClick={() => setDetails({ type: 'Analisis de correo', data: item })}>
                     <span className={clsSeverity(item.severity)}>{item.severity}</span>
                     <strong>{shortText(item.subject, 80)}</strong>
-                    <small>{item.sender || '-'} / score {item.score}</small>
+                    <small>{item.sender || '-'} / score {item.score} / {item.raw?.analysis?.verdict || item.severity}</small>
                   </button>
                 ))}
               </div>
@@ -1078,6 +1104,22 @@ function App() {
                 <h2>{details.type}</h2>
                 <button className="icon-btn" onClick={() => setDetails(null)}>Cerrar</button>
               </div>
+              {details.type === 'Alerta' && (
+                <div className="triage-panel">
+                  <span className="triage-pill">{classificationLabels[details.data.classification] || details.data.classification || 'Sin clasificar'}</span>
+                  <button onClick={() => classifyAlert(details.data, 'true_positive', 'confirmed')}>True positive</button>
+                  <button onClick={() => classifyAlert(details.data, 'false_positive', 'closed')}>False positive</button>
+                  <button onClick={() => classifyAlert(details.data, 'benign_true_positive', 'closed')}>Benigno real</button>
+                  <button onClick={() => classifyAlert(details.data, 'needs_review', 'investigating')}>En revision</button>
+                </div>
+              )}
+              {details.type === 'Analisis de correo' && (
+                <div className="phishing-verdict">
+                  <strong>{details.data.raw?.analysis?.verdict || details.data.severity}</strong>
+                  <span>{details.data.raw?.analysis?.authVerdict || 'cabeceras no concluyentes'}</span>
+                  <small>{details.data.raw?.analysis?.recommendedAction || 'Revisar evidencia del correo.'}</small>
+                </div>
+              )}
               <pre>{prettyJson(details.data)}</pre>
             </section>
           </div>
