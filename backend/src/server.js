@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import http from 'http';
@@ -97,8 +97,8 @@ function analyzeEmailThreat(rawEmail){
   if(returnPath && senderDomain && returnPathDomain && senderDomain !== returnPathDomain){ score += 15; indicators.push(`Return-Path no coincide con From: ${returnPath}`); }
   if(/spf=(fail|softfail|neutral|temperror|permerror)|dkim=(fail|neutral|temperror|permerror)|dmarc=(fail|temperror|permerror)/i.test(authResults)){ score += 30; indicators.push('SPF/DKIM/DMARC fallido o debil'); }
   if(/spf=pass/i.test(authResults) && /dkim=pass/i.test(authResults) && /dmarc=pass/i.test(authResults)){ score -= 10; indicators.push('Autenticacion SPF/DKIM/DMARC valida'); }
-  if(/password|contrase(?:ñ|n)a|verifica|verify|urgent|urgente|suspend|bloquead|factura|invoice|payment|pago|cuenta|account/.test(lower)){ score += 15; indicators.push('Lenguaje de urgencia o credenciales'); }
-  if(/login|signin|iniciar sesi(?:o|ó)n|actualizar cuenta|verify account/.test(lower)){ score += 15; indicators.push('Solicitud de inicio de sesion o verificacion'); }
+  if(/password|contrase(?:Ã±|n)a|verifica|verify|urgent|urgente|suspend|bloquead|factura|invoice|payment|pago|cuenta|account/.test(lower)){ score += 15; indicators.push('Lenguaje de urgencia o credenciales'); }
+  if(/login|signin|iniciar sesi(?:o|Ã³)n|actualizar cuenta|verify account/.test(lower)){ score += 15; indicators.push('Solicitud de inicio de sesion o verificacion'); }
   if(attachments.some((item)=>item.risky)){ score += 30; indicators.push('Adjunto con extension riesgosa'); }
   if(urls.some((item)=>shortenerDomains.includes(item.domain))){ score += 20; indicators.push('URL acortada'); }
   if(urls.some((item)=>/xn--/.test(item.domain))){ score += 20; indicators.push('Dominio punycode posible homografo'); }
@@ -175,6 +175,56 @@ function isPrivateIp(ip){
   if(parts.length !== 4 || parts.some((part)=>Number.isNaN(part))) return false;
   const [a,b] = parts;
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 169 || a === 127;
+}
+
+
+function isLocalOrLabIp(ip){
+  const raw = normalizeIpValue(ip);
+  if(!raw) return true;
+  if(raw === '::1' || raw === '127.0.0.1') return true;
+  if(raw === '192.168.42.1' || raw === 'fd0d:edc3:e12a::1') return true;
+  if(raw.startsWith('fe80:') || raw.startsWith('fd')) return true;
+  const parts = raw.split('.').map(Number);
+  if(parts.length !== 4 || parts.some((part)=>Number.isNaN(part))) return false;
+  const [a,b] = parts;
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 127;
+}
+
+function isTrustedProcess(processName){
+  const normalized = String(processName || '').replace(/\//g,'\\').toLowerCase();
+  return ['chrome.exe','msedge.exe','svchost.exe','system','powershell.exe'].some((name)=>
+    normalized === name || normalized.endsWith('\\' + name)
+  );
+}
+
+function scorePortScan(row, options = {}){
+  const attempts = Number(row?.attempts || 0);
+  const attempts60 = Number(row?.attempts_60 || attempts);
+  const uniquePorts = Number(row?.ports || row?.unique_ports || 0);
+  const uniqueHosts = Number(row?.hosts || row?.unique_hosts || 0);
+  const sensitivePorts = Array.isArray(row?.sensitive_ports) ? row.sensitive_ports.map(Number).filter(Boolean) : [];
+  const isLocalSource = isLocalOrLabIp(row?.source_ip);
+  const trustedProcess = isTrustedProcess(row?.process) && !options.forceProcessSuspicious;
+  const labMode = process.env.SOC_MODE !== 'production';
+  const reasons = [];
+  let score = 0;
+
+  if(attempts60 > 10){ score += 25; reasons.push(attempts60 + ' intentos en 60s'); }
+  if(uniquePorts > 15){ score += 35; reasons.push(uniquePorts + ' puertos unicos en 120s'); }
+  if(uniquePorts > 25){ score += 25; reasons.push('mas de 25 puertos unicos (' + uniquePorts + ')'); }
+  if(uniqueHosts > 3){ score += 25; reasons.push(uniqueHosts + ' hosts destino en menos de 2 minutos'); }
+  if(sensitivePorts.length){ score += 15; reasons.push('puertos sensibles tocados: ' + sensitivePorts.join(', ')); }
+  if(uniquePorts <= 3 && uniqueHosts <= 1){ score -= 35; reasons.push('pocos puertos/host: trafico observado, no escaneo'); }
+  if(isLocalSource){ score -= 45; reasons.push('origen local/lab allowlist'); }
+  if(trustedProcess && uniquePorts <= 15 && uniqueHosts <= 3){ score -= 20; reasons.push('proceso confiable: ' + row.process); }
+
+  score = Math.max(0, Math.min(100, score));
+  if(labMode && score >= 90 && (isLocalSource || (uniquePorts < 50 && uniqueHosts < 5))){
+    score = 89;
+    reasons.push('modo lab/demo: critico reservado para patron claramente malicioso');
+  }
+  const severity = score >= 90 ? 'critical' : score >= 75 ? 'high' : score >= 60 ? 'medium' : score >= 40 ? 'low' : 'info';
+  return {score, severity, shouldAlert:score >= 40, reasons};
 }
 
 function readJsonFile(filePath, fallback){
@@ -460,39 +510,50 @@ async function detectImmediatePortScan(event){
   const r = await pool.query(
     `SELECT
        count(*)::int AS attempts,
+       count(*) FILTER (WHERE created_at > now() - interval '60 seconds')::int AS attempts_60,
        count(DISTINCT destination_port)::int AS ports,
+       count(DISTINCT destination_ip)::int AS hosts,
+       max(process) AS process,
        array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port IS NOT NULL) AS port_list,
-       bool_or(destination_port = ANY($2::int[])) AS touched_sensitive_port,
-       max(created_at) AS last_seen
+       array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port = ANY($2::int[])) AS sensitive_ports,
+       max(created_at) AS last_seen,
+       min(created_at) AS first_seen,
+       count(*) FILTER (WHERE created_at > now() - interval '60 seconds')::int AS attempts_60,
+       count(DISTINCT destination_ip)::int AS hosts,
+       max(process) AS process
      FROM events
      WHERE source_ip=$1
        AND destination_port IS NOT NULL
        AND destination_port <> ALL($3::int[])
-       AND created_at > now() - interval '5 minutes'`,
+       AND created_at > now() - interval '120 seconds'`,
     [event.sourceIp, sensitiveScanPorts, noisyScanPorts]
   );
   const row = r.rows[0];
   if(!row) return null;
-  const shouldAlert = (row.attempts >= 8 && row.ports >= 3)
-    || (row.attempts >= 25 && row.ports >= 2)
-    || row.ports >= 5
-    || (row.attempts >= 4 && row.touched_sensitive_port);
-  if(!shouldAlert) return null;
+  const score = scorePortScan({...row, source_ip:event.sourceIp, process:row.process || event.process});
+  if(!score.shouldAlert) return null;
   const evidence = {
     source_ip: event.sourceIp,
     hostname: event.hostname,
+    process: row.process || event.process || '',
     attempts: row.attempts,
-    ports: row.ports,
-    port_list: row.port_list,
-    touched_sensitive_port: row.touched_sensitive_port,
-    window: '5 minutes',
+    attempts_60: row.attempts_60,
+    unique_ports: row.ports,
+    unique_hosts: row.hosts,
+    port_list: row.port_list || [],
+    sensitive_ports: row.sensitive_ports || [],
+    score: score.score,
+    severity: score.severity,
+    reasons: score.reasons,
+    window: '120 seconds',
+    first_seen: row.first_seen,
     last_seen: row.last_seen
   };
   const alert = await pool.query(
-    `INSERT INTO alerts(title,severity,status,hostname,source_ip,matched_term,mitre,recommendation,evidence)
-     VALUES('Posible escaneo de puertos','high','new',$1,$2,$3,'T1046','Reconocimiento de red detectado en tiempo real. Revisar puertos tocados y bloquear IP si no es autorizada.',$4)
+    `INSERT INTO alerts(title,severity,status,hostname,source_ip,process,matched_term,mitre,recommendation,evidence)
+     VALUES('Posible escaneo de puertos',$1,'new',$2,$3,$4,$5,'T1046','Correlacion real de port scanning. Validar puertos unicos, hosts destino y proceso antes de bloquear.',$6)
      RETURNING *`,
-    [event.hostname, event.sourceIp, `${row.attempts} conexiones / ${row.ports} puertos`, JSON.stringify(evidence)]
+    [score.severity, event.hostname, event.sourceIp, evidence.process, 'score ' + score.score + ': ' + score.reasons.join('; '), JSON.stringify(evidence)]
   );
   return alert.rows[0];
 }
@@ -555,6 +616,20 @@ async function cleanupLocalNoiseAlerts(){
        AND (
          regexp_replace(lower(source_ip), '%.*$', '') = ANY($1::text[])
          OR lower(source_ip) LIKE 'fe80:%'
+         OR lower(source_ip) LIKE 'fd%'
+         OR source_ip LIKE '10.%'
+         OR source_ip LIKE '192.168.%'
+         OR source_ip ~ '^172\\.(1[6-9]|2[0-9]|3[0-1])\\.'
+         OR source_ip IN ('127.0.0.1','::1','192.168.42.1','fd0d:edc3:e12a::1')
+         OR (
+           severity IN ('critical','high')
+           AND coalesce((evidence->>'score')::int, 0) < 75
+         )
+         OR (
+           severity IN ('critical','high')
+           AND coalesce((evidence->>'unique_ports')::int, (evidence->>'ports')::int, 0) <= 15
+           AND coalesce((evidence->>'unique_hosts')::int, 0) <= 3
+         )
        )
      RETURNING id`,
     [localAddresses]
@@ -562,7 +637,6 @@ async function cleanupLocalNoiseAlerts(){
   for(const row of result.rows) io.emit('alert:delete',{id:row.id});
   return result.rowCount;
 }
-
 app.post('/api/events', async (req,res)=>{
   const created = await ingestRawEvents(req.body);
   res.json({ok:true, alerts:created.length});
@@ -584,12 +658,12 @@ app.get('/api/network', async (_,res)=>{
                   source_ip,
                   count(*)::int AS attempts,
                   count(DISTINCT destination_port)::int AS ports,
-                  bool_or(destination_port = ANY($3::int[])) AS touched_sensitive_port,
+                  array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port = ANY($3::int[])) AS sensitive_ports,
                   max(created_at) AS last_seen,
-                  ((count(*) >= 8 AND count(DISTINCT destination_port) >= 3)
-                    OR (count(*) >= 25 AND count(DISTINCT destination_port) >= 2)
-                    OR count(DISTINCT destination_port) >= 5
-                    OR (count(*) >= 4 AND bool_or(destination_port = ANY($3::int[])))) AS is_attack
+                  count(DISTINCT destination_ip)::int AS hosts,
+                  ((count(*) > 10 AND count(DISTINCT destination_port) > 15)
+                    OR count(DISTINCT destination_port) > 25
+                    OR count(DISTINCT destination_ip) > 3) AS is_attack
                 FROM events
                 WHERE source_ip IS NOT NULL
                   AND source_ip <> ''
@@ -627,7 +701,7 @@ app.get('/api/attacks', async (_,res)=>{
        count(*)::int AS attempts,
        count(DISTINCT destination_port)::int AS ports,
        array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port IS NOT NULL) AS port_list,
-       bool_or(destination_port = ANY($2::int[])) AS touched_sensitive_port,
+       array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port = ANY($2::int[])) AS sensitive_ports,
        max(created_at) AS last_seen,
        min(created_at) AS first_seen
      FROM events
@@ -648,17 +722,13 @@ app.get('/api/attacks', async (_,res)=>{
        ORDER BY CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, created_at DESC LIMIT 1`,
       [row.source_ip]
     );
-    const inferredAttack = (row.attempts >= 8 && row.ports >= 3)
-      || (row.attempts >= 25 && row.ports >= 2)
-      || row.ports >= 5
-      || (row.attempts >= 4 && row.touched_sensitive_port);
-    const severity = alertSeverity.rows[0]?.severity || (inferredAttack ? 'high' : 'info');
-    if(severity === 'info' && !inferredAttack) continue;
+    const scanScore = scorePortScan(row);
+    const severity = alertSeverity.rows[0]?.severity || scanScore.severity;
     const lastSeenMs = new Date(row.last_seen).getTime();
     const alertMs = alertSeverity.rows[0]?.created_at ? new Date(alertSeverity.rows[0].created_at).getTime() : 0;
     const recentWindowMs = 10 * 60 * 1000;
-    const isAttack = ['critical','high'].includes(severity) && (Date.now() - Math.max(lastSeenMs, alertMs) <= recentWindowMs);
-    items.push({...row, intel, severity, is_attack:isAttack});
+    const isAttack = scanScore.shouldAlert && ['critical','high'].includes(severity) && (Date.now() - Math.max(lastSeenMs, alertMs) <= recentWindowMs);
+    items.push({...row, intel, severity, score:scanScore.score, reasons:scanScore.reasons, is_attack:isAttack});
   }
   res.json(items);
 });
@@ -963,7 +1033,7 @@ app.post('/api/actions/:type', async (req,res)=>{
   if(req.params.type === 'generate_report' && !target) target = alertId || 'manual';
   if(!target) return res.status(400).json({error:'target requerido'});
   if(!allowed || secret !== process.env.RESPONSE_SHARED_SECRET) {
-    const r=await insertActionRecord({ alertId, type:req.params.type, target, status:'audit-only', output:'Acción registrada en modo auditoría. No se ejecutó en el sistema.' });
+    const r=await insertActionRecord({ alertId, type:req.params.type, target, status:'audit-only', output:'AcciÃ³n registrada en modo auditorÃ­a. No se ejecutÃ³ en el sistema.' });
     return res.json(r.rows[0]);
   }
   if(req.params.type === 'generate_report'){
@@ -980,7 +1050,7 @@ app.post('/api/actions/:type', async (req,res)=>{
   }
   const scriptMap={ block_ip:'block_ip.ps1', unblock_ip:'unblock_ip.ps1', block_port:'block_port.ps1', isolate_host:'isolate_host.ps1', defender_scan:'defender_scan.ps1', locate_malware:'locate_malware.ps1', remove_malware:'remove_malware.ps1', quarantine_file:'quarantine_file.ps1', kill_process:'kill_process.ps1', enable_firewall_logging:'enable_firewall_logging.ps1', disable_firewall_logging:'disable_firewall_logging.ps1' };
   const script=scriptMap[req.params.type];
-  if(!script) return res.status(400).json({error:'acción no soportada'});
+  if(!script) return res.status(400).json({error:'acciÃ³n no soportada'});
   const scriptPath=path.join(projectRoot,'scripts',script);
   if(!fs.existsSync(scriptPath)) {
     return res.status(500).json({error:`Script no encontrado: ${scriptPath}`});
