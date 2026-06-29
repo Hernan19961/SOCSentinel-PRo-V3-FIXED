@@ -213,16 +213,18 @@ function scorePortScan(row, options = {}){
   let score = 0;
 
   if(attempts60 > 10){ score += 25; reasons.push(attempts60 + ' intentos en 60s'); }
+  if(uniquePorts >= 2 && sensitivePorts.length >= 2){ score += 45; reasons.push('posible escaneo sigiloso: ' + sensitivePorts.length + ' puertos de reconocimiento'); }
   if(uniquePorts > 15){ score += 35; reasons.push(uniquePorts + ' puertos unicos en 120s'); }
   if(uniquePorts > 25){ score += 25; reasons.push('mas de 25 puertos unicos (' + uniquePorts + ')'); }
   if(uniqueHosts > 3){ score += 25; reasons.push(uniqueHosts + ' hosts destino en menos de 2 minutos'); }
   if(sensitivePorts.length){ score += 15; reasons.push('puertos sensibles tocados: ' + sensitivePorts.join(', ')); }
-  if(uniquePorts <= 3 && uniqueHosts <= 1){ score -= 35; reasons.push('pocos puertos/host: trafico observado, no escaneo'); }
-  if(isLocalSource){ score -= 45; reasons.push('origen local/lab allowlist'); }
-  if(trustedProcess && uniquePorts <= 15 && uniqueHosts <= 3){ score -= 20; reasons.push('proceso confiable: ' + row.process); }
+  if(uniquePorts <= 3 && uniqueHosts <= 1 && sensitivePorts.length < 2){ score -= 35; reasons.push('pocos puertos/host: trafico observado, no escaneo'); }
+  if(isLocalSource && uniquePorts < 25 && uniqueHosts <= 3 && sensitivePorts.length < 2){ score -= 45; reasons.push('origen local/lab allowlist'); }
+  else if(isLocalSource){ score -= 10; reasons.push('origen local/lab con patron fuerte de escaneo'); }
+  if(trustedProcess && uniquePorts <= 15 && uniqueHosts <= 3 && sensitivePorts.length < 2){ score -= 20; reasons.push('proceso confiable: ' + row.process); }
 
   score = Math.max(0, Math.min(100, score));
-  if(labMode && score >= 90 && (isLocalSource || (uniquePorts < 50 && uniqueHosts < 5))){
+  if(labMode && score >= 90 && (isLocalSource || ((uniquePorts < 50 && uniqueHosts < 5) && !sensitivePorts.length))){
     score = 89;
     reasons.push('modo lab/demo: critico reservado para patron claramente malicioso');
   }

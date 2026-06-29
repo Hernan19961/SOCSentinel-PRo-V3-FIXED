@@ -37,15 +37,17 @@ function scorePortScan(row){
   const reasons = [];
   let score = 0;
   if(attempts60 > 10){ score += 25; reasons.push(attempts60 + ' intentos en 60s'); }
+  if(uniquePorts >= 2 && sensitivePorts.length >= 2){ score += 45; reasons.push('posible escaneo sigiloso: ' + sensitivePorts.length + ' puertos de reconocimiento'); }
   if(uniquePorts > 15){ score += 35; reasons.push(uniquePorts + ' puertos unicos en 120s'); }
   if(uniquePorts > 25){ score += 25; reasons.push('mas de 25 puertos unicos (' + uniquePorts + ')'); }
   if(uniqueHosts > 3){ score += 25; reasons.push(uniqueHosts + ' hosts destino en menos de 2 minutos'); }
   if(sensitivePorts.length){ score += 15; reasons.push('puertos sensibles tocados: ' + sensitivePorts.join(', ')); }
-  if(uniquePorts <= 3 && uniqueHosts <= 1){ score -= 35; reasons.push('pocos puertos/host: trafico observado, no escaneo'); }
-  if(isLocalOrLabIp(row?.source_ip)){ score -= 45; reasons.push('origen local/lab allowlist'); }
-  if(isTrustedProcess(row?.process) && uniquePorts <= 15 && uniqueHosts <= 3){ score -= 20; reasons.push('proceso confiable: ' + row.process); }
+  if(uniquePorts <= 3 && uniqueHosts <= 1 && sensitivePorts.length < 2){ score -= 35; reasons.push('pocos puertos/host: trafico observado, no escaneo'); }
+  if(isLocalOrLabIp(row?.source_ip) && uniquePorts < 25 && uniqueHosts <= 3 && sensitivePorts.length < 2){ score -= 45; reasons.push('origen local/lab allowlist'); }
+  else if(isLocalOrLabIp(row?.source_ip)){ score -= 10; reasons.push('origen local/lab con patron fuerte de escaneo'); }
+  if(isTrustedProcess(row?.process) && uniquePorts <= 15 && uniqueHosts <= 3 && sensitivePorts.length < 2){ score -= 20; reasons.push('proceso confiable: ' + row.process); }
   score = Math.max(0, Math.min(100, score));
-  if(process.env.SOC_MODE !== 'production' && score >= 90 && (isLocalOrLabIp(row?.source_ip) || (uniquePorts < 50 && uniqueHosts < 5))){
+  if(process.env.SOC_MODE !== 'production' && score >= 90 && (isLocalOrLabIp(row?.source_ip) || ((uniquePorts < 50 && uniqueHosts < 5) && !sensitivePorts.length))){
     score = 89;
     reasons.push('modo lab/demo: critico reservado para patron claramente malicioso');
   }
@@ -83,7 +85,7 @@ export async function runCorrelation(io, options = {}){
       count(DISTINCT destination_port)::int AS ports,
       count(DISTINCT destination_ip)::int AS hosts,
       array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port IS NOT NULL) AS port_list,
-      array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port IN (22,445,3389,5985)) AS sensitive_ports,
+      array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port IN (21,22,23,25,53,80,135,139,443,445,3389,5985,8080)) AS sensitive_ports,
       max(created_at) AS last_seen,
       min(created_at) AS first_seen
     FROM events
