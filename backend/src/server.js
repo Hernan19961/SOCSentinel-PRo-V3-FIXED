@@ -36,6 +36,8 @@ let correlationRunning = false;
 const riskyAttachmentExt = ['.exe','.scr','.bat','.cmd','.ps1','.vbs','.js','.jse','.wsf','.hta','.iso','.img','.lnk','.docm','.xlsm','.zip','.rar','.7z','.html','.htm'];
 const shortenerDomains = ['bit.ly','tinyurl.com','t.co','goo.gl','ow.ly','is.gd','buff.ly','cutt.ly','rebrand.ly','lnkd.in'];
 const brandNames = ['microsoft','office','outlook','onedrive','google','gmail','paypal','amazon','apple','netflix','banco','bank','dhl','fedex','github','facebook','instagram'];
+const riskyTlds = ['zip','mov','top','xyz','click','monster','quest','work','cam','country','stream','gq','tk','ml','cf'];
+const phishingUrlTerms = ['login','signin','verify','verification','secure','security','account','password','update','confirm','recover','wallet','payment','factura','banco','cuenta'];
 
 function normalizeHeaders(raw){
   return String(raw || '').replace(/\r?\n[ \t]+/g, ' ');
@@ -68,6 +70,20 @@ function hostnameFromUrl(url){
   try { return new URL(url).hostname.toLowerCase().replace(/^www\./,''); } catch { return ''; }
 }
 
+function baseDomain(domain){
+  const parts = String(domain || '').toLowerCase().split('.').filter(Boolean);
+  return parts.length >= 2 ? parts.slice(-2).join('.') : parts.join('.');
+}
+
+function isIpHost(domain){
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(domain || '')) || /^\[[0-9a-f:]+\]$/i.test(String(domain || ''));
+}
+
+function extractHrefPairs(raw){
+  return [...String(raw || '').matchAll(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)]
+    .map((m)=>({href:m[1], text:String(m[2] || '').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim()}));
+}
+
 function extractAttachments(raw){
   const names = [...String(raw || '').matchAll(/filename\*?=(?:UTF-8''|")?([^"\r\n;]+)/gi)].map((m)=>decodeURIComponent(String(m[1]).replace(/"/g,'').trim()));
   const dispositions = [...String(raw || '').matchAll(/name="([^"]+)"/gi)].map((m)=>m[1].trim());
@@ -87,7 +103,8 @@ function analyzeEmailThreat(rawEmail){
   const recipient = extractEmailAddress(recipientHeader);
   const senderDomain = domainFromEmail(sender);
   const returnPathDomain = domainFromEmail(returnPath);
-  const urls = extractUrls(rawEmail).map((url)=>({url, domain:hostnameFromUrl(url)}));
+  const hrefPairs = extractHrefPairs(rawEmail);
+  const urls = [...new Set([...extractUrls(rawEmail), ...hrefPairs.map((item)=>item.href)])].map((url)=>({url, domain:hostnameFromUrl(url)}));
   const attachments = extractAttachments(rawEmail).map((name)=>({name, risky:riskyAttachmentExt.some((ext)=>name.toLowerCase().endsWith(ext))}));
   const lower = String(rawEmail || '').toLowerCase();
   const indicators = [];
@@ -96,12 +113,27 @@ function analyzeEmailThreat(rawEmail){
   if(replyTo && sender && replyTo !== sender){ score += 15; indicators.push(`Reply-To distinto del remitente: ${replyTo}`); }
   if(returnPath && senderDomain && returnPathDomain && senderDomain !== returnPathDomain){ score += 15; indicators.push(`Return-Path no coincide con From: ${returnPath}`); }
   if(/spf=(fail|softfail|neutral|temperror|permerror)|dkim=(fail|neutral|temperror|permerror)|dmarc=(fail|temperror|permerror)/i.test(authResults)){ score += 30; indicators.push('SPF/DKIM/DMARC fallido o debil'); }
-  if(/spf=pass/i.test(authResults) && /dkim=pass/i.test(authResults) && /dmarc=pass/i.test(authResults)){ score -= 10; indicators.push('Autenticacion SPF/DKIM/DMARC valida'); }
+  if(/spf=pass/i.test(authResults) && /dkim=pass/i.test(authResults) && /dmarc=pass/i.test(authResults)){ score -= urls.length ? 3 : 10; indicators.push('Autenticacion SPF/DKIM/DMARC valida'); }
   if(/password|contrase(?:Ã±|n)a|verifica|verify|urgent|urgente|suspend|bloquead|factura|invoice|payment|pago|cuenta|account/.test(lower)){ score += 15; indicators.push('Lenguaje de urgencia o credenciales'); }
   if(/login|signin|iniciar sesi(?:o|Ã³)n|actualizar cuenta|verify account/.test(lower)){ score += 15; indicators.push('Solicitud de inicio de sesion o verificacion'); }
   if(attachments.some((item)=>item.risky)){ score += 30; indicators.push('Adjunto con extension riesgosa'); }
   if(urls.some((item)=>shortenerDomains.includes(item.domain))){ score += 20; indicators.push('URL acortada'); }
   if(urls.some((item)=>/xn--/.test(item.domain))){ score += 20; indicators.push('Dominio punycode posible homografo'); }
+  if(urls.some((item)=>isIpHost(item.domain))){ score += 35; indicators.push('URL usa IP directa como host'); }
+  if(urls.some((item)=>riskyTlds.includes(item.domain.split('.').pop()))){ score += 20; indicators.push('TLD frecuentemente usado en phishing'); }
+  if(urls.some((item)=>phishingUrlTerms.some((term)=>item.url.toLowerCase().includes(term)))){ score += 25; indicators.push('URL contiene terminos de login/verificacion/credenciales'); }
+  if(urls.some((item)=>item.domain.split('.').length >= 4)){ score += 15; indicators.push('Dominio con multiples subdominios sospechosos'); }
+  if(senderDomain && urls.some((item)=>item.domain && baseDomain(item.domain) !== baseDomain(senderDomain))){ score += 20; indicators.push('Dominio del enlace no coincide con el remitente'); }
+  if(urls.some((item)=>/[?&](url|u|target|redirect|redir|r|continue|next)=https?%3a/i.test(item.url) || /https?:\/\/.+https?:\/\//i.test(item.url))){ score += 25; indicators.push('URL contiene redireccion o enlace anidado'); }
+  for(const pair of hrefPairs){
+    const visibleDomain = hostnameFromUrl(pair.text);
+    const hrefDomain = hostnameFromUrl(pair.href);
+    if(visibleDomain && hrefDomain && baseDomain(visibleDomain) !== baseDomain(hrefDomain)){
+      score += 35;
+      indicators.push('Texto visible del link no coincide con href real');
+      break;
+    }
+  }
 
   for(const item of urls){
     for(const brand of brandNames){
@@ -699,6 +731,8 @@ app.get('/api/network', async (_,res)=>{
 });
 app.get('/api/attacks', async (_,res)=>{
   const localAddresses = trustedLocalIps();
+  const blocked = await pool.query("SELECT ip FROM blocked_ips WHERE status='blocked'");
+  const blockedIpList = blocked.rows.map((row)=>row.ip);
   const r = await pool.query(
     `SELECT
        source_ip,
@@ -708,22 +742,26 @@ app.get('/api/attacks', async (_,res)=>{
        array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port IS NOT NULL) AS port_list,
        array_agg(DISTINCT destination_port ORDER BY destination_port) FILTER (WHERE destination_port = ANY($2::int[])) AS sensitive_ports,
        max(created_at) AS last_seen,
-       min(created_at) AS first_seen
+       min(created_at) AS first_seen,
+       count(*) FILTER (WHERE created_at > now() - interval '60 seconds')::int AS attempts_60,
+       count(DISTINCT destination_ip)::int AS hosts,
+       max(process) AS process
      FROM events
      WHERE source_ip IS NOT NULL
        AND source_ip <> ''
        AND NOT (regexp_replace(lower(source_ip), '%.*$', '') = ANY($1::text[]))
+       AND NOT (source_ip = ANY($3::text[]))
        AND created_at > now() - interval '24 hours'
      GROUP BY source_ip
      ORDER BY last_seen DESC
      LIMIT 80`,
-    [localAddresses, sensitiveScanPorts]
+    [localAddresses, sensitiveScanPorts, blockedIpList]
   );
   const items = [];
   for(const row of r.rows){
     const intel = await getIpIntel(row.source_ip);
     const alertSeverity = await pool.query(
-      `SELECT severity, created_at FROM alerts WHERE source_ip=$1 AND created_at > now() - interval '24 hours'
+      `SELECT severity, created_at FROM alerts WHERE source_ip=$1 AND status <> 'map_cleared' AND created_at > now() - interval '24 hours'
        ORDER BY CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, created_at DESC LIMIT 1`,
       [row.source_ip]
     );
@@ -737,6 +775,23 @@ app.get('/api/attacks', async (_,res)=>{
   }
   res.json(items);
 });
+app.post('/api/attacks/clear', async (req,res)=>{
+  const ip = normalizeIpValue(req.body?.ip || '');
+  const values = [];
+  let where = "title='Posible escaneo de puertos' AND status IN ('new','investigating','confirmed')";
+  if(ip){
+    values.push(ip);
+    where += ' AND source_ip=$1';
+  }
+  const result = await pool.query(
+    `UPDATE alerts SET status='map_cleared', analyst_notes=coalesce(analyst_notes,'') || '\n[map] visualizacion limpiada por analista' WHERE ${where} RETURNING id`,
+    values
+  );
+  for(const row of result.rows) io.emit('alert:update',{id:row.id,status:'map_cleared'});
+  io.emit('attacks:clear',{ip:ip || null, count:result.rowCount});
+  res.json({ok:true, cleared:result.rowCount, ip:ip || null});
+});
+
 app.get('/api/ip/:ip/intel', async (req,res)=>{
   const intel = await getIpIntel(req.params.ip);
   res.json(intel || {error:'ip requerida'});

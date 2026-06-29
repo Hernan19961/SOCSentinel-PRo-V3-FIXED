@@ -384,6 +384,21 @@ function App() {
     setAttacks(nextAttacks);
   }
 
+  async function clearAttackMap(ip = '') {
+    const message = ip ? `Limpiar visualizacion del mapa para ${ip}? No desbloquea IP ni borra eventos.` : 'Limpiar visualizacion roja del mapa? No desbloquea IP ni borra eventos.';
+    if (!confirm(message)) return;
+    const result = await fetch(`${API}/api/attacks/clear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip }),
+    }).then((response) => response.json());
+    setAttacks((current) => ip ? current.filter((item) => item.source_ip !== ip) : current.map((item) => ({ ...item, is_attack: false, severity: item.severity === 'critical' || item.severity === 'high' ? 'info' : item.severity })));
+    setAlarmAckAt(Date.now());
+    pushConsole(`mapa limpiado: ${result.cleared ?? 0} alertas visuales`);
+    loadAttackFeed();
+    load();
+  }
+
   async function inspectIp(ip) {
     if (!ip) return;
     const [intel, nextTimeline] = await Promise.all([
@@ -741,6 +756,7 @@ function App() {
               <div className="panel-head">
                 <h2>Mapa de ataques en tiempo real</h2>
                 <span>IP origen, reputacion y destino local</span>
+                <button className="tool" onClick={() => clearAttackMap()}>Limpiar mapa</button>
               </div>
               <div className="attack-map">
                 <div className="globe">
@@ -788,6 +804,7 @@ function App() {
                     <strong>{attack.source_ip}</strong>
                     <span>{attack.intel?.city || '-'}, {attack.intel?.country || '-'}</span>
                     <small>{attack.attempts} intentos / {attack.ports} puertos / {formatTime(attack.last_seen)}</small>
+                    {attack.is_attack && <small onClick={(event) => { event.stopPropagation(); clearAttackMap(attack.source_ip); }}>limpiar visual</small>}
                   </button>
                 ))}
               </div>
